@@ -1,0 +1,39 @@
+---
+alwaysApply: true
+---
+# control-plane
+
+The orchestrator. Reads config, manages the secret store, provisions sandboxes,
+coordinates the LLM proxy. CLI-driven.
+
+## Conventions
+
+- **Language:** Go 1.25+
+- **Commits:** Conventional Commits (feat/fix/refactor/docs/test/ci/chore).
+  Prefix every commit message. Breaking changes go in the commit footer.
+- **Testing:** Standard Go testing with table-driven tests
+- **Build:** Use `make` for all operations. Run `make help` for targets.
+- **Formatting:** `make fmt` runs goimports + golangci-lint
+- **Errors:** Wrap with `fmt.Errorf("context: %w", err)`
+- **Constructors:** Use `func NewFoo() *Foo` pattern
+- **No manual versions:** semver is automated by semantic-release from commit history
+
+## Package Layout
+
+- `cmd/` - CLI subcommands (up, down, status, secrets)
+- `pkg/config/` - sandbox.toml parsing
+- `pkg/secrets/` - Encrypted secret store (age) and session token generation
+- `pkg/provisioner/` - Provisioner interface + Docker and Unikraft backends
+- `pkg/orchestrator/` - Boot sequence: secrets -> provision -> inject -> start
+
+## Key Design Decisions
+
+1. **sandbox.toml config.** Single config file per project defines sandbox_mode,
+   secrets (with proxy/inject mode), agent config, and shared dirs.
+2. **Hybrid credential model.** Each secret has a mode: "proxy" (control plane
+   proxies via llm-proxy with session tokens) or "inject" (real value injected
+   as env var into the sandbox directly).
+3. **Provisioner interface.** Same code handles Docker and Unikraft via a
+   common interface. sandbox_mode in config selects which backend.
+4. **Orchestrator.** The boot sequence is: resolve secrets, provision sandbox,
+   register proxy sessions, inject env vars, start the sandbox.

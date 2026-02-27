@@ -1,0 +1,49 @@
+# Example sandbox configuration for the control plane.
+# Copy this to sandbox.toml and adjust for your setup.
+
+# Sandbox runtime: "docker" for local dev and Pi, "unikraft" for Mac/cloud.
+sandbox_mode = "docker"
+
+# Container image reference. Must be built from the sandbox-image repo.
+# For local dev: build with `docker build -t sandbox-image:latest .` in sandbox-image/
+image = "sandbox-image:latest"
+
+# LLM proxy configuration.
+[proxy]
+addr = ":8090"
+
+# Agent running inside the sandbox.
+[agent]
+command = "claude"
+args = ["--model", "sonnet"]
+user = "agent"
+workdir = "/workspace"
+
+# Secrets with hybrid credential model.
+# mode = "proxy"  -> Control plane proxies via llm-proxy with session tokens.
+#                    The real API key never enters the sandbox.
+# mode = "inject" -> Real value injected directly as env var.
+
+[secrets.anthropic_key]
+mode = "proxy"
+env_var = "ANTHROPIC_API_KEY"
+provider = "anthropic"
+# upstream_url = "https://api.anthropic.com"  # Optional override
+
+[secrets.github_token]
+mode = "inject"
+env_var = "GITHUB_TOKEN"
+
+[secrets.ssh_key]
+mode = "inject"
+env_var = "SSH_PRIVATE_KEY"
+
+# Shared directories mounted into the sandbox.
+[[shared_dirs]]
+host_path = "./workspace"
+guest_path = "/workspace"
+
+[[shared_dirs]]
+host_path = "./data"
+guest_path = "/data"
+read_only = true
