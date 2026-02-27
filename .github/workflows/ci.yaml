@@ -12,9 +12,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      - run: go mod download
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.10.1
 
   test:
     runs-on: ubuntu-latest
@@ -23,6 +24,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - run: go mod download
       - run: make test
 
   vet:
@@ -32,6 +34,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - run: go mod download
       - run: make vet
 
   commitlint:
