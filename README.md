@@ -1,120 +1,17 @@
 # control-plane
 
-The orchestrator for the agent sandbox system. Reads a `sandbox.toml` config, manages an encrypted secret store, provisions sandboxes (Docker or Unikraft), and coordinates the [llm-proxy](https://github.com/Travbz/llm-proxy) for credential proxying. One command to boot an isolated agent environment with the hybrid credential model.
+The orchestrator for the agent sandbox system. Reads a `sandbox.toml` config, manages a pluggable secret store, provisions sandboxes (Docker, Fly Machines, or Unikraft), coordinates the [llm-proxy](https://github.com/Travbz/llm-proxy) for credential proxying, and spins up MCP tool sidecars. One command to boot a fully isolated agent environment with the hybrid credential model.
 
-Part of a three-service system:
+## System overview
 
 | Repo | What it does |
 |---|---|
-| **[control-plane](https://github.com/Travbz/control-plane)** | This repo -- orchestrator, config, secrets, provisioning |
-| **[llm-proxy](https://github.com/Travbz/llm-proxy)** | Credential-injecting LLM reverse proxy |
+| **[control-plane](https://github.com/Travbz/control-plane)** | This repo -- orchestrator, config, secrets, provisioning, tools, memory, billing |
+| **[llm-proxy](https://github.com/Travbz/llm-proxy)** | Credential-injecting LLM reverse proxy with token metering |
 | **[sandbox-image](https://github.com/Travbz/sandbox-image)** | Container image -- entrypoint, env stripping, privilege drop |
-
----
-
-## Getting started
-
-### Prerequisites
-
-- **Go 1.25+** (or [Nix](https://nixos.org/) — each repo has a `flake.nix`)
-- **Docker** (Docker Desktop on Mac, Docker Engine on Linux/Pi)
-- All three repos cloned as siblings:
-
-```
-~/projects/          # or wherever you keep things
-├── control-plane/   # this repo
-├── llm-proxy/
-└── sandbox-image/
-```
-
-### Quick setup (automated)
-
-There's a setup script that builds everything and walks you through credential config:
-
-```bash
-cd control-plane
-./setup.sh
-```
-
-It builds all three services, prompts for your Anthropic API key, and drops a ready-to-run hello-world example in `my-first-sandbox/`.
-
-### Manual setup
-
-If you'd rather do it yourself:
-
-```bash
-# 1. Build the LLM proxy
-cd ../llm-proxy
-make build
-
-# 2. Build the sandbox container image
-cd ../sandbox-image
-make image-local
-
-# 3. Build the control plane
-cd ../control-plane
-make build
-```
-
-### Adding credentials
-
-The control plane stores secrets in `~/.config/control-plane/secrets/`. Add them by name — these names are what you reference in `sandbox.toml`.
-
-```bash
-# LLM key — will be proxied, never enters the sandbox
-./build/control-plane secrets add --name anthropic_key --value "sk-ant-api03-..."
-
-# Direct-inject secrets — these go straight into the sandbox as env vars
-./build/control-plane secrets add --name github_token --value "ghp_..."
-
-# Verify
-./build/control-plane secrets list
-```
-
-Secret names here must match the `[secrets.<name>]` keys in your `sandbox.toml`. The control plane looks them up by name when booting a sandbox.
-
-### Hello world
-
-The `examples/hello-world/` directory has a minimal setup that makes a single Anthropic API call through the proxy. It proves the full flow works end to end.
-
-```bash
-# terminal 1 — start the proxy
-../llm-proxy/build/llm-proxy -addr :8090
-
-# terminal 2 — boot the sandbox
-cd examples/hello-world
-../../build/control-plane up --name hello-world
-```
-
-Or just run the all-in-one script:
-
-```bash
-cd examples/hello-world
-./run.sh
-```
-
-What this does:
-
-1. The control plane reads `sandbox.toml`, sees `anthropic_key` is `mode = "proxy"`
-2. Generates a session token, registers it with the proxy (real key stays on host)
-3. Creates a Docker container with `ANTHROPIC_API_KEY=session-<token>` and `ANTHROPIC_BASE_URL=http://host.docker.internal:8090`
-4. The container's `agent.sh` calls the Anthropic API using those env vars
-5. The request hits the proxy, which swaps the token for the real key and forwards to Anthropic
-6. Claude responds with "Hello world"
-
-The real API key never enters the container.
-
-### What happens inside the sandbox
-
-When a proxied secret is configured, the control plane injects two env vars per provider:
-
-| Provider | API key env var | Base URL env var |
-|---|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` (session token) | `ANTHROPIC_BASE_URL` (proxy URL) |
-| OpenAI | `OPENAI_API_KEY` (session token) | `OPENAI_BASE_URL` (proxy URL) |
-| Ollama | `OLLAMA_API_KEY` (session token) | `OLLAMA_HOST` (proxy URL) |
-
-This means standard SDKs (the Anthropic Python SDK, OpenAI Python SDK, etc.) work out of the box — they read those env vars and automatically route through the proxy. No code changes needed in the agent.
+| **[api-gateway](https://github.com/Travbz/api-gateway)** | Customer-facing REST API -- job submission, SSE streaming, billing |
+| **[tools](https://github.com/Travbz/tools)** | MCP tool monorepo -- spec, reference tools |
+| **[agent](https://github.com/Travbz/agent)** | Reference agent implementation |
 
 ---
 
@@ -123,31 +20,122 @@ This means standard SDKs (the Anthropic Python SDK, OpenAI Python SDK, etc.) wor
 ```mermaid
 flowchart LR
     subgraph Host
+        GW[api-gateway]
         CP[control-plane]
         Proxy[llm-proxy]
         Secrets[(secret store)]
+        Allow[allowlist proxy]
     end
 
-    subgraph Sandbox
+    subgraph Sandbox Network
         Entry[entrypoint]
         Agent[agent process]
+        Tool1[tool: echo]
+        Tool2[tool: gmail]
     end
 
-    LLM[LLM Provider]
-
+    Customer[Customer API] -->|"POST /v1/jobs"| GW
+    GW -->|"create sandbox"| CP
     CP -->|"read secrets"| Secrets
     CP -->|"register session"| Proxy
-    CP -->|"Docker API / Unikraft API"| Entry
+    CP -->|"Docker / Fly / Unikraft"| Entry
     Entry --> Agent
     Agent -->|"HTTP + session token"| Proxy
-    Proxy -->|"HTTPS + real API key"| LLM
+    Agent -->|"MCP calls"| Tool1
+    Agent -->|"MCP calls"| Tool2
+    Agent -.->|"outbound HTTP"| Allow
+    Allow -.->|"allowed hosts only"| Internet((Internet))
+    Proxy -->|"HTTPS + real API key"| LLM[LLM Provider]
 ```
 
 ---
 
-## The boot sequence
+## Getting started
 
-When you run `control-plane up`, here's what happens:
+### Prerequisites
+
+- **Go 1.24+**
+- **Docker** (Docker Desktop on Mac, Docker Engine on Linux/Pi)
+- All repos cloned as siblings:
+
+```
+~/projects/
+├── control-plane/    # this repo
+├── llm-proxy/
+├── sandbox-image/
+├── api-gateway/      # optional: customer-facing API
+├── tools/            # optional: MCP tool sidecars
+└── agent/            # optional: reference agent
+```
+
+### Quick setup (automated)
+
+```bash
+cd control-plane
+./setup.sh
+```
+
+Builds all three core services, prompts for your Anthropic API key, and drops a ready-to-run hello-world example in `my-first-sandbox/`.
+
+### Manual setup
+
+```bash
+# 1. Build the LLM proxy
+cd ../llm-proxy && make build
+
+# 2. Build the sandbox container image
+cd ../sandbox-image && make image-local
+
+# 3. Build the control plane
+cd ../control-plane && make build
+```
+
+### Adding credentials
+
+The control plane stores secrets in `~/.config/control-plane/secrets/`. Add them by name -- these names are what you reference in `sandbox.toml`.
+
+```bash
+# LLM key -- will be proxied, never enters the sandbox
+./build/control-plane secrets add --name anthropic_key --value "sk-ant-api03-..."
+
+# Direct-inject secrets -- these go straight into the sandbox as env vars
+./build/control-plane secrets add --name github_token --value "ghp_..."
+
+# Verify
+./build/control-plane secrets list
+```
+
+### Hello world
+
+The `examples/hello-world/` directory proves the full flow end to end.
+
+```bash
+# terminal 1 -- start the proxy
+../llm-proxy/build/llm-proxy -addr :8090
+
+# terminal 2 -- boot the sandbox
+cd examples/hello-world
+../../build/control-plane up --name hello-world
+```
+
+Or the all-in-one script:
+
+```bash
+cd examples/hello-world && ./run.sh
+```
+
+What this does:
+
+1. Reads `sandbox.toml`, sees `anthropic_key` with `mode = "proxy"`
+2. Generates a session token, registers it with the proxy (real key stays on host)
+3. Creates a Docker container with `ANTHROPIC_API_KEY=session-<token>` and `ANTHROPIC_BASE_URL=http://host.docker.internal:8090`
+4. Agent script calls Anthropic through the proxy
+5. Proxy swaps token for real key, forwards to Anthropic
+6. Claude responds. Real API key never entered the container.
+
+---
+
+## The boot sequence
 
 ```mermaid
 sequenceDiagram
@@ -155,32 +143,41 @@ sequenceDiagram
     participant CP as control-plane
     participant Store as secret store
     participant Proxy as llm-proxy
-    participant Docker as Docker / Unikraft
+    participant Docker as Provisioner
     participant Sandbox as sandbox
+    participant Tools as tool sidecars
 
     User->>CP: control-plane up --name my-agent
     CP->>Store: Resolve secrets from sandbox.toml
-    Store-->>CP: Real values for inject secrets, keys for proxy secrets
+    Store-->>CP: Values for inject secrets, keys for proxy secrets
 
     CP->>CP: Generate session tokens for proxy secrets
+    CP->>CP: Merge [env] + env_file vars
     CP->>Proxy: Register sessions (token -> real key + provider)
     Proxy-->>CP: OK
 
-    CP->>Docker: Create container with env vars
-    Note over Docker: Inject secrets: real values<br/>Proxy secrets: session tokens<br/>Agent config: command, args, workdir
+    alt Tools configured
+        CP->>Docker: Create sandbox network
+        CP->>Docker: Start tool sidecar containers on network
+        CP->>CP: Build TOOL_ENDPOINTS env var
+    end
+
+    CP->>Docker: Create container (hardened, resource-limited)
+    Note over Docker: Inject secrets, session tokens,<br/>TOOL_ENDPOINTS, agent config,<br/>HTTP_PROXY if allowlisted
 
     CP->>Docker: Start container
     Docker->>Sandbox: Container boots
     Sandbox->>Sandbox: Entrypoint strips control plane vars, drops privileges
     Sandbox->>Proxy: Agent makes LLM calls with session token
-    Proxy->>Proxy: Swaps token for real key, forwards upstream
+    Sandbox->>Tools: Agent calls tools via MCP over HTTP
+    Proxy->>Proxy: Swaps token for real key, meters tokens
 ```
 
 ---
 
 ## Hybrid credential model
 
-This is the key design decision. Not everything needs to be proxied, and not everything should be injected directly. Each secret in `sandbox.toml` has a mode:
+Each secret in `sandbox.toml` has a mode:
 
 | Mode | What happens | Good for |
 |---|---|---|
@@ -198,15 +195,22 @@ mode = "inject"
 env_var = "GITHUB_TOKEN"
 ```
 
+When a proxied secret is configured, the control plane injects two env vars per provider:
+
+| Provider | API key env var | Base URL env var |
+|---|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` (session token) | `ANTHROPIC_BASE_URL` (proxy URL) |
+| OpenAI | `OPENAI_API_KEY` (session token) | `OPENAI_BASE_URL` (proxy URL) |
+| Ollama | `OLLAMA_API_KEY` (session token) | `OLLAMA_HOST` (proxy URL) |
+
+Standard SDKs read these env vars and route through the proxy automatically. No code changes needed in the agent.
+
 ---
 
 ## Config (`sandbox.toml`)
 
 ```toml
-# Runtime: "docker" for dev/Pi, "unikraft" for Mac/cloud
-sandbox_mode = "docker"
-
-# Container image from the sandbox-image repo
+sandbox_mode = "docker"           # "docker", "fly", or "unikraft"
 image = "sandbox-image:latest"
 
 [proxy]
@@ -218,6 +222,15 @@ args = ["--model", "sonnet"]
 user = "agent"
 workdir = "/workspace"
 
+# Environment variables (plain, no secret management)
+[env]
+LOG_LEVEL = "debug"
+NODE_ENV = "production"
+
+# Or load from a file
+env_file = ".env"
+
+# Secrets with injection modes
 [secrets.anthropic_key]
 mode = "proxy"
 env_var = "ANTHROPIC_API_KEY"
@@ -227,12 +240,182 @@ provider = "anthropic"
 mode = "inject"
 env_var = "GITHUB_TOKEN"
 
+# Shared directories
 [[shared_dirs]]
 host_path = "./workspace"
 guest_path = "/workspace"
+
+# Resource limits
+[resources]
+memory = "512m"
+cpus = "1"
+
+# MCP tool sidecars
+[[tools]]
+name = "echo"
+image = "ghcr.io/yourorg/tool-echo:latest"
+transport = "http"
+port = 8080
+
+# Network restrictions (empty = unrestricted)
+[network]
+allowed_hosts = ["api.anthropic.com", "*.github.com"]
+proxy_port = 3128
 ```
 
-See `sandbox.toml.example` for a fully annotated version.
+---
+
+## Sandbox runtimes
+
+The provisioner interface abstracts the sandbox backend. A single config switch selects which runtime to use:
+
+```mermaid
+flowchart TD
+    Config[sandbox.toml] --> Switch{sandbox_mode}
+    Switch -->|docker| Docker[Docker Engine API<br/>Unix socket]
+    Switch -->|fly| Fly[Fly Machines API<br/>Firecracker VMs]
+    Switch -->|unikraft| UKC[Unikraft Cloud API<br/>kraft.cloud]
+
+    Docker --> Container[Container<br/>dev / Pi / test]
+    Fly --> FlyVM[Fly Machine<br/>production / cloud]
+    UKC --> MicroVM[Micro-VM<br/>macOS / cloud]
+
+    style Docker fill:#066,stroke:#333,color:#fff
+    style Fly fill:#630,stroke:#333,color:#fff
+    style UKC fill:#606,stroke:#333,color:#fff
+```
+
+- **Docker** -- Local Docker daemon over Unix socket. Dev, test, Raspberry Pi. Containers get `host.docker.internal` for reaching the proxy on the host.
+- **Fly Machines** -- Firecracker VMs via the Fly Machines REST API. Production multi-tenant isolation. Configurable region and machine size.
+- **Unikraft** -- kraft.cloud REST API for ultra-lightweight micro-VMs. Needs `UKC_TOKEN` env var.
+
+### Container hardening (Docker)
+
+Docker sandboxes get automatic security hardening:
+
+- All capabilities dropped (`CAP_DROP: ALL`)
+- No privilege escalation (`no-new-privileges`)
+- Read-only root filesystem
+- Writable tmpfs at `/tmp` and `/run` only
+- Optional memory and CPU limits via `[resources]`
+
+---
+
+## Secret store backends
+
+The secret store is pluggable. Multiple backends implement the same interface:
+
+```mermaid
+flowchart LR
+    CP[control-plane] --> IF{secrets.Store}
+    IF -->|local dev| FS[FileStore<br/>~/.config/.../secrets.json]
+    IF -->|CI / env| ES[EnvStore<br/>SECRET_* env vars]
+    IF -->|customer vault| DS[DelegatedStore<br/>AWS SM / Vault]
+
+    style IF fill:#333,stroke:#999,color:#fff
+```
+
+| Backend | When to use | Set/Delete | Persistence |
+|---|---|---|---|
+| `FileStore` | Local dev, Pi | Yes | JSON file, 0600 perms |
+| `EnvStore` | CI pipelines, containers | No (read-only at runtime) | Env vars / .env file |
+| `DelegatedStore` | Multi-tenant production | No (customer manages) | AWS Secrets Manager or HashiCorp Vault |
+
+The `DelegatedStore` fetches secrets from a customer's own vault at runtime with a short TTL cache. Customers rotate and manage their own credentials -- the control plane never stores them.
+
+---
+
+## Network allowlisting
+
+When `[network] allowed_hosts` is set, the sandbox can only reach those domains. A lightweight forward proxy runs on the host and the sandbox routes all HTTP(S) traffic through it:
+
+```toml
+[network]
+allowed_hosts = ["api.anthropic.com", "*.github.com", "registry.npmjs.org"]
+proxy_port = 3128
+```
+
+- Supports exact match and wildcard subdomains
+- Handles both HTTPS tunnels (CONNECT) and plain HTTP
+- Logs blocked requests for audit
+- `NO_PROXY` is set automatically for intra-sandbox traffic (localhost, tool sidecars)
+
+---
+
+## MCP tools
+
+Tools are standalone Docker containers that speak MCP. They run as sidecars on the sandbox network.
+
+```toml
+[[tools]]
+name = "echo"
+image = "ghcr.io/yourorg/tool-echo:latest"
+transport = "http"
+port = 8080
+
+[tools.env]
+API_KEY = "inject:some_api_key"
+```
+
+The orchestrator:
+1. Creates an isolated Docker network for the sandbox
+2. Starts each tool container on that network
+3. Builds a `TOOL_ENDPOINTS` env var (e.g. `echo=http://echo:8080`)
+4. Injects it into the agent container
+
+Tool env values prefixed with `inject:` are resolved from the secret store.
+
+---
+
+## Server mode
+
+For production, the control plane can run as an HTTP server:
+
+```bash
+control-plane serve --listen :8091
+```
+
+This exposes an internal API for the [api-gateway](https://github.com/Travbz/api-gateway):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/internal/v1/sandboxes` | Create and start a sandbox |
+| `GET` | `/internal/v1/sandboxes` | List all sandboxes |
+| `GET` | `/internal/v1/sandboxes/{id}` | Get sandbox status |
+| `DELETE` | `/internal/v1/sandboxes/{id}` | Destroy a sandbox |
+
+---
+
+## Memory and personalization
+
+### Memory store
+
+The memory package provides conversation history and semantic fact storage with pluggable backends:
+
+| Backend | Use case | Semantic search |
+|---|---|---|
+| `SQLiteStore` | Local dev, single-node | No (returns empty) |
+| `PostgresStore` | Production, multi-tenant | Yes (via pgvector) |
+
+### Customer profiles
+
+Per-customer configuration for personalization:
+
+```json
+{
+  "customer_id": "acme-corp",
+  "system_prompt_additions": "Always respond in a formal tone.",
+  "default_tools": ["gmail", "calendar"],
+  "memory_enabled": true,
+  "secrets_provider": {
+    "type": "aws_sm",
+    "region": "us-east-1",
+    "role_arn": "arn:aws:iam::role/acme-secrets"
+  },
+  "max_concurrent_jobs": 5,
+  "token_budget": 1000000
+}
+```
 
 ---
 
@@ -241,36 +424,30 @@ See `sandbox.toml.example` for a fully annotated version.
 ### Managing secrets
 
 ```bash
-# add secrets to the encrypted store
 control-plane secrets add --name anthropic_key --value "sk-ant-..."
 control-plane secrets add --name github_token --value "ghp_..."
-
-# list stored secret names
 control-plane secrets list
-
-# remove a secret
 control-plane secrets rm --name old_key
 ```
 
-### Running sandboxes
+### Running sandboxes (CLI)
 
 ```bash
-# start a sandbox (reads sandbox.toml in current directory)
-control-plane up --name my-agent
+control-plane up --name my-agent              # reads sandbox.toml
+control-plane status                          # list all sandboxes
+control-plane status --id <container-id>      # single sandbox
+control-plane down --id <container-id>        # stop and destroy
+```
 
-# check status
-control-plane status
-control-plane status --id <container-id>
+### Running as a server
 
-# stop and destroy
-control-plane down --id <container-id>
+```bash
+control-plane serve --listen :8091
 ```
 
 ---
 
 ## Building
-
-Requires Go 1.25+. Use `nix develop` if you have Nix.
 
 ```bash
 make build    # builds to ./build/control-plane
@@ -279,83 +456,69 @@ make lint     # golangci-lint
 make vet      # go vet
 ```
 
-### End-to-end test
-
-There's an e2e script that tests the full flow -- proxy sessions, secret management, and Docker sandbox creation:
-
-```bash
-# prerequisites: docker running, llm-proxy and sandbox-image built
-./e2e_test.sh
-```
-
----
-
-## Sandbox runtimes
-
-The provisioner interface abstracts the sandbox backend. A single config switch controls which one is used:
-
-```mermaid
-flowchart TD
-    Config[sandbox.toml] --> Switch{sandbox_mode}
-    Switch -->|docker| Docker[Docker Engine API<br/>Unix socket]
-    Switch -->|unikraft| UKC[Unikraft Cloud REST API<br/>kraft.cloud]
-
-    Docker --> Container[Container on local Docker]
-    UKC --> MicroVM[Micro-VM on Unikraft Cloud]
-
-    style Docker fill:#066,stroke:#333,color:#fff
-    style UKC fill:#606,stroke:#333,color:#fff
-```
-
-- **Docker** -- talks to the Docker daemon over the Unix socket. Used for local development and Raspberry Pi deployment. Containers get `host.docker.internal` for reaching the proxy on the host.
-- **Unikraft** -- talks to the kraft.cloud REST API. Used for macOS and cloud production. Needs `UKC_TOKEN` env var set.
-
 ---
 
 ## Project structure
 
 ```
 control-plane/
-├── main.go                              # CLI entry point + subcommand dispatch
+├── main.go
 ├── cmd/
-│   ├── up.go                            # start a sandbox
-│   ├── down.go                          # stop + destroy a sandbox
-│   ├── status.go                        # sandbox status / list
-│   ├── secrets.go                       # secrets add/rm/list
+│   ├── up.go                        # start a sandbox
+│   ├── down.go                      # stop + destroy
+│   ├── status.go                    # sandbox status / list
+│   ├── secrets.go                   # secrets add/rm/list
+│   ├── serve.go                     # HTTP server mode
 │   └── helpers.go
 ├── pkg/
 │   ├── config/
-│   │   ├── config.go                    # sandbox.toml parsing + validation
-│   │   └── config_test.go
+│   │   └── config.go                # sandbox.toml parsing + validation
 │   ├── secrets/
-│   │   ├── store.go                     # encrypted secret store
-│   │   ├── session.go                   # session token generation
-│   │   └── store_test.go
+│   │   ├── iface.go                 # Store interface
+│   │   ├── store.go                 # FileStore (JSON file)
+│   │   ├── env.go                   # EnvStore (env vars / .env file)
+│   │   ├── delegated.go             # DelegatedStore (AWS SM / Vault)
+│   │   └── session.go               # session token generation
 │   ├── provisioner/
-│   │   ├── provisioner.go               # Provisioner interface
-│   │   ├── docker.go                    # Docker Engine API backend
-│   │   └── unikraft.go                  # Unikraft Cloud API backend
-│   └── orchestrator/
-│       └── orchestrator.go              # boot sequence coordination
+│   │   ├── provisioner.go           # Provisioner interface
+│   │   ├── docker.go                # Docker Engine API backend
+│   │   ├── fly.go                   # Fly Machines API backend
+│   │   └── unikraft.go              # Unikraft Cloud API backend
+│   ├── orchestrator/
+│   │   └── orchestrator.go          # boot sequence + tool orchestration
+│   ├── allowlist/
+│   │   └── proxy.go                 # outbound traffic allowlist proxy
+│   ├── agent/
+│   │   └── contract.go              # agent I/O contract types
+│   ├── memory/
+│   │   ├── iface.go                 # Store interface
+│   │   ├── sqlite.go                # SQLite backend
+│   │   └── postgres.go              # PostgreSQL + pgvector backend
+│   └── customer/
+│       └── profile.go               # customer profile + secret provider config
 ├── examples/
 │   └── hello-world/
-│       ├── sandbox.toml                 # minimal config for hello-world
-│       ├── agent.sh                     # curl-based Anthropic API call
-│       └── run.sh                       # all-in-one runner
-├── setup.sh                             # bootstraps all three repos
-├── sandbox.toml.example
-├── e2e_test.sh
+│       ├── sandbox.toml
+│       ├── agent.sh
+│       └── run.sh
+├── docs/
+│   ├── architecture.md
+│   ├── configuration.md
+│   ├── credentials.md
+│   ├── provisioners.md
+│   ├── secret-store.md
+│   └── PRD-discovery.md
+├── setup.sh
 ├── Makefile
 ├── go.mod
-├── flake.nix
 ├── .releaserc.yaml
 └── .github/workflows/
-    ├── ci.yaml                          # lint, test, vet on PRs
-    └── release.yaml                     # semantic-release on main
+    ├── ci.yaml
+    └── release.yaml
 ```
 
 ---
 
 ## Versioning
 
-Automated with [semantic-release](https://github.com/semantic-release/semantic-release) from [conventional commits](https://www.conventionalcommits.org/). No manual version bumps.
+Automated with [semantic-release](https://github.com/semantic-release/semantic-release) from [conventional commits](https://www.conventionalcommits.org/).

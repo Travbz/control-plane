@@ -1,146 +1,169 @@
 # Architecture
 
-The control plane is the orchestrator for the entire sandbox system. It reads configuration, manages secrets, provisions sandboxes, and coordinates the LLM proxy. This document covers the full architecture across all three services.
+The control plane is the orchestrator for the entire agent sandbox system. It reads configuration, manages secrets, provisions sandboxes, coordinates the LLM proxy, starts MCP tool sidecars, and optionally restricts outbound network access. This document covers the full architecture across all services.
 
 ## System overview
 
 ```mermaid
 flowchart TB
-    User[Developer] -->|"sandbox up"| CP[control-plane CLI]
+    Customer[Customer API] -->|"POST /v1/jobs"| GW[api-gateway]
+    User[Developer] -->|"sandbox up"| CP
 
     subgraph host [Host Machine]
-        CP
-        SecretStore["Secret Store (~/.control-plane/secrets.json)"]
+        GW
+        CP[control-plane]
+        SecretStore["Secret Store<br/>(File / Env / AWS SM / Vault)"]
         LLMProxy[llm-proxy :8090]
+        AllowProxy[allowlist proxy :3128]
         Docker[Docker Daemon]
     end
 
-    subgraph sandbox [Sandbox Container]
+    subgraph sandbox [Sandbox Network]
         Entrypoint[entrypoint binary]
         Agent[Agent Process]
+        ToolEcho[tool: echo]
+        ToolCustom[tool: custom]
         Workspace["/workspace (bind mount)"]
     end
 
-    subgraph cloud [Internet]
+    subgraph cloud [External Services]
         Anthropic[Anthropic API]
         OpenAI[OpenAI API]
-        Kraft[kraft.cloud API]
+        FlyAPI[Fly Machines API]
     end
 
     CP -->|"read secrets"| SecretStore
     CP -->|"register sessions"| LLMProxy
     CP -->|"create container"| Docker
-    CP -->|"or create VM"| Kraft
+    CP -->|"or create VM"| FlyAPI
     Docker -->|"start"| Entrypoint
     Entrypoint -->|"syscall.Exec"| Agent
     Agent -->|"LLM calls via session token"| LLMProxy
+    Agent -->|"MCP HTTP calls"| ToolEcho
+    Agent -->|"MCP HTTP calls"| ToolCustom
+    Agent -.->|"outbound HTTP"| AllowProxy
+    AllowProxy -.->|"allowed hosts only"| Anthropic
     LLMProxy -->|"swap token, forward"| Anthropic
     LLMProxy -->|"swap token, forward"| OpenAI
+    LLMProxy -->|"meter tokens"| LLMProxy
 ```
 
-## The three services
+## Services
 
-| Repo | Role | Runs on |
+| Service | Role | Runs on |
 |---|---|---|
-| **control-plane** | Orchestrator. Reads config, manages secrets, provisions sandboxes, coordinates the proxy. | Host machine (CLI binary) |
-| **llm-proxy** | Stateless reverse proxy. Validates session tokens, injects real API keys, streams responses. | Host machine (long-running daemon) |
-| **sandbox-image** | Container image + entrypoint binary. Strips env vars, drops privileges, execs the agent. | Inside the sandbox (Docker container or Unikraft VM) |
+| **control-plane** | Orchestrator. Config, secrets, provisioning, tools, network policy. | Host (CLI or HTTP server) |
+| **llm-proxy** | Stateless reverse proxy. Token validation, credential injection, token metering. | Host (daemon) |
+| **sandbox-image** | Container image + entrypoint. Env stripping, privilege drop, exec agent. | Inside sandbox |
+| **api-gateway** | Customer-facing REST API. Job submission, SSE streaming, billing. | Host (daemon) |
+| **tools** | MCP tool sidecar containers. One per tool, on sandbox network. | Inside sandbox network |
+| **agent** | Reference agent. LLM calls + tool execution loop. | Inside sandbox |
 
-They communicate over HTTP:
+## Communication flow
 
 ```mermaid
 sequenceDiagram
-    participant User as Developer
+    participant Customer
+    participant GW as api-gateway
     participant CP as control-plane
+    participant Store as secret store
     participant Proxy as llm-proxy
-    participant Docker as Docker
-    participant Sandbox as Sandbox
+    participant Docker as Provisioner
+    participant Sandbox as sandbox
+    participant Tools as tool sidecars
 
-    User->>CP: sandbox up my-agent
-    CP->>CP: Load sandbox.toml
-    CP->>CP: Resolve secrets from store
+    Customer->>GW: POST /v1/jobs {prompt, tools}
+    GW->>CP: POST /internal/v1/sandboxes
+
+    CP->>Store: Resolve secrets
     CP->>CP: Generate session tokens
+    CP->>CP: Merge [env] + env_file
 
-    CP->>Docker: Create container (env vars, mounts)
-    Docker-->>CP: Container ID
+    alt Tools configured
+        CP->>Docker: Create sandbox network
+        CP->>Docker: Start tool sidecar containers
+    end
 
-    CP->>Proxy: POST /v1/sessions (register token)
-    Proxy-->>CP: 201 Created
+    CP->>Docker: Create agent container (hardened)
+    CP->>Proxy: Register sessions (token -> real key)
+    CP->>Docker: Start agent container
 
-    CP->>Docker: Start container
-    Docker->>Sandbox: Container starts
+    Sandbox->>Proxy: LLM call with session token
+    Proxy->>Proxy: Swap token, forward, meter usage
+    Sandbox->>Tools: MCP tool calls
 
-    Note over Sandbox: Entrypoint strips env, drops privs, execs agent
-
-    Sandbox->>Proxy: POST /v1/messages (session token)
-    Proxy->>Proxy: Validate token, swap for real key
-    Proxy-->>Sandbox: Streaming response
+    GW->>Proxy: GET /v1/sessions/{token}/usage
+    GW->>Customer: GET /v1/usage (billing)
 ```
-
-## Pattern 2: isolate the agent
-
-This system implements "Pattern 2" from the Browser Use sandbox architecture: **the entire agent runs in an isolated environment with zero direct access to secrets**.
-
-The key principle: the sandbox has no internet access for LLM calls. All API traffic is forced through the proxy on the host. The agent thinks it's talking to the LLM provider directly (the SDK base URL is set to point at the proxy), but the proxy is the one holding the real credentials.
-
-This means:
-- A compromised agent can't exfiltrate API keys (they're not in the environment)
-- A compromised agent can't make unauthorized API calls (the proxy gates every request)
-- The control plane can revoke access instantly by deleting the session
 
 ## Boot sequence
 
-The `Up` command in `pkg/orchestrator/orchestrator.go` runs these steps in order:
+The `Up` command in `pkg/orchestrator/orchestrator.go` runs these steps:
 
 1. **Resolve secrets.** For each secret in `sandbox.toml`:
-   - `inject` mode: read the real value from the secret store, add it to the env map
-   - `proxy` mode: generate a random session token, add the token to the env map, set the provider's base URL env var (e.g., `ANTHROPIC_BASE_URL`) to point at the proxy
+   - `inject` mode: read real value from store, add to env map
+   - `proxy` mode: generate session token, add token to env, set provider base URL
 
-2. **Set agent config.** Add `AGENT_COMMAND`, `AGENT_ARGS`, `AGENT_USER`, `AGENT_WORKDIR` to the env map.
+2. **Merge environment.** Combine `[env]` table and `env_file` values into the env map.
 
-3. **Set control plane URL.** Add `CONTROL_PLANE_URL` so the sandbox knows where the proxy is.
+3. **Set agent config.** `AGENT_COMMAND`, `AGENT_ARGS`, `AGENT_USER`, `AGENT_WORKDIR`.
 
-4. **Build mounts.** Convert `shared_dirs` from config into bind mount specs.
+4. **Set control plane URL.** `CONTROL_PLANE_URL` for the sandbox.
 
-5. **Provision sandbox.** Call the provisioner (Docker or Unikraft) to create the container/VM with the env vars and mounts.
+5. **Network allowlist.** If `[network] allowed_hosts` is set, inject `HTTP_PROXY` / `HTTPS_PROXY` pointing at the allowlist proxy.
 
-6. **Register proxy sessions.** For each `proxy` mode secret, POST to the llm-proxy with the session token, the real API key, and the provider name.
+6. **Build mounts.** Convert `shared_dirs` to bind mount specs.
 
-7. **Start sandbox.** Tell the provisioner to start the container/VM. The entrypoint takes over from here.
+7. **Create sandbox network.** If tools are configured, create an isolated Docker network.
 
-If any step fails, the orchestrator cleans up everything it already created (destroys the container, revokes proxy sessions).
+8. **Start tool sidecars.** Launch each `[[tools]]` container on the sandbox network.
 
-## Teardown sequence
+9. **Provision sandbox.** Call the provisioner with the env map, mounts, resource limits, and network ID.
 
-The `Down` command:
+10. **Register proxy sessions.** POST to llm-proxy for each `proxy` mode secret.
 
-1. Stop the container/VM
-2. Destroy the container/VM
+11. **Start sandbox.** The entrypoint takes over from here.
 
-Proxy sessions are ephemeral (in-memory) and don't survive a proxy restart. In the future, the teardown will also explicitly revoke sessions.
+If any step fails, the orchestrator rolls back: destroys containers, revokes sessions, removes the network.
+
+## Teardown
+
+The `Down` command stops the container, destroys it, and cleans up tool sidecars and the sandbox network.
 
 ## Package structure
 
 ```
 pkg/
-├── config/
-│   ├── config.go      # sandbox.toml parsing + validation
-│   └── config_test.go
+├── config/          # sandbox.toml parsing + validation
 ├── secrets/
-│   ├── store.go       # JSON-backed secret store
-│   ├── session.go     # Session token generation
-│   └── store_test.go
+│   ├── iface.go     # Store interface
+│   ├── store.go     # FileStore (JSON file)
+│   ├── env.go       # EnvStore (env vars)
+│   ├── delegated.go # DelegatedStore (AWS SM / Vault)
+│   └── session.go   # Session token generation
 ├── provisioner/
-│   ├── provisioner.go # Provisioner interface
-│   ├── docker.go      # Docker Engine API backend
-│   └── unikraft.go    # kraft.cloud REST API backend
-└── orchestrator/
-    └── orchestrator.go # Boot + teardown coordination
+│   ├── provisioner.go  # Provisioner interface
+│   ├── docker.go       # Docker Engine API
+│   ├── fly.go          # Fly Machines API
+│   └── unikraft.go     # kraft.cloud API
+├── orchestrator/
+│   └── orchestrator.go # Boot + teardown + tool orchestration
+├── allowlist/
+│   └── proxy.go     # HTTP CONNECT forward proxy with host allowlisting
+├── agent/
+│   └── contract.go  # Agent I/O contract types
+├── memory/
+│   ├── iface.go     # Store interface
+│   ├── sqlite.go    # SQLite backend
+│   └── postgres.go  # PostgreSQL + pgvector backend
+└── customer/
+    └── profile.go   # Customer profile + secrets provider config
 
 cmd/
-├── up.go              # CLI: sandbox up
-├── down.go            # CLI: sandbox down
-├── status.go          # CLI: sandbox status
-├── secrets.go         # CLI: secrets add/list/remove
-└── helpers.go         # Shared CLI helpers
+├── up.go           # CLI: sandbox up
+├── down.go         # CLI: sandbox down
+├── status.go       # CLI: sandbox status
+├── secrets.go      # CLI: secrets add/list/remove
+├── serve.go        # HTTP server mode
+└── helpers.go
 ```

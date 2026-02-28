@@ -36,6 +36,16 @@ type CreateOpts struct {
 	// ProxyAddr is the address of the LLM proxy the sandbox should reach.
 	// The provisioner ensures this is reachable from inside the sandbox.
 	ProxyAddr string
+
+	// Memory is the container memory limit (e.g. "512m", "1g"). Empty = no limit.
+	Memory string
+
+	// CPUs is the CPU limit (e.g. "0.5", "2"). Empty = no limit.
+	CPUs string
+
+	// NetworkID is a pre-created Docker network to attach to.
+	// If empty, the container uses bridge mode.
+	NetworkID string
 }
 
 // Mount defines a bind mount.

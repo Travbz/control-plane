@@ -2,15 +2,17 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the top-level sandbox configuration.
 type Config struct {
-	// SandboxMode selects the provisioner backend: "docker" or "unikraft".
+	// SandboxMode selects the provisioner backend: "docker", "unikraft", or "fly".
 	SandboxMode string `toml:"sandbox_mode"`
 
 	// Image is the sandbox container/VM image reference.
@@ -27,6 +29,36 @@ type Config struct {
 
 	// SharedDirs defines host directories to mount into the sandbox.
 	SharedDirs []SharedDir `toml:"shared_dirs"`
+
+	// Env is a flat map of environment variables injected directly into the
+	// sandbox. These are plain key-value pairs with no secret management.
+	Env map[string]string `toml:"env"`
+
+	// EnvFile is an optional path to a .env file. Key-value pairs from this
+	// file are merged into the sandbox environment. Values in [env] take
+	// precedence over values from env_file.
+	EnvFile string `toml:"env_file"`
+
+	// Resources configures container resource limits.
+	Resources ResourceConfig `toml:"resources"`
+
+	// Tools defines MCP tool sidecars to start alongside the agent.
+	Tools []ToolConfig `toml:"tools"`
+
+	// Network configures sandbox networking restrictions.
+	Network NetworkConfig `toml:"network"`
+}
+
+// NetworkConfig controls outbound network access from the sandbox.
+type NetworkConfig struct {
+	// AllowedHosts is a list of host patterns the sandbox may reach.
+	// Supports exact match ("api.anthropic.com") and wildcard subdomains
+	// ("*.anthropic.com"). An empty list means no outbound restrictions.
+	AllowedHosts []string `toml:"allowed_hosts"`
+
+	// ProxyPort is the listen port for the allowlist proxy sidecar
+	// (default: 3128). Only used when AllowedHosts is non-empty.
+	ProxyPort int `toml:"proxy_port,omitempty"`
 }
 
 // ProxyConfig configures the LLM proxy.
@@ -82,6 +114,34 @@ type SharedDir struct {
 	ReadOnly bool `toml:"read_only,omitempty"`
 }
 
+// ResourceConfig defines container resource limits.
+type ResourceConfig struct {
+	// Memory is the memory limit (e.g. "512m", "1g"). Empty means no limit.
+	Memory string `toml:"memory,omitempty"`
+
+	// CPUs is the CPU limit (e.g. "0.5", "2"). Empty means no limit.
+	CPUs string `toml:"cpus,omitempty"`
+}
+
+// ToolConfig defines an MCP tool sidecar container.
+type ToolConfig struct {
+	// Name is the tool's identifier, used as the container name on the sandbox network.
+	Name string `toml:"name"`
+
+	// Image is the Docker image for the tool.
+	Image string `toml:"image"`
+
+	// Transport is the MCP transport: "stdio" or "http".
+	Transport string `toml:"transport"`
+
+	// Port is the port the tool listens on (only for http transport).
+	Port int `toml:"port,omitempty"`
+
+	// Env is tool-specific environment variables. Values prefixed with
+	// "inject:" are resolved from the secret store.
+	Env map[string]string `toml:"env"`
+}
+
 // Load reads and parses a sandbox.toml configuration file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -104,12 +164,12 @@ func Load(path string) (*Config, error) {
 // validate checks the configuration for required fields and valid values.
 func (c *Config) validate() error {
 	switch c.SandboxMode {
-	case "docker", "unikraft":
+	case "docker", "unikraft", "fly":
 		// valid
 	case "":
-		return fmt.Errorf("sandbox_mode is required (docker or unikraft)")
+		return fmt.Errorf("sandbox_mode is required (docker, unikraft, or fly)")
 	default:
-		return fmt.Errorf("unknown sandbox_mode: %q (must be docker or unikraft)", c.SandboxMode)
+		return fmt.Errorf("unknown sandbox_mode: %q (must be docker, unikraft, or fly)", c.SandboxMode)
 	}
 
 	if c.Image == "" {
@@ -140,4 +200,59 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// ResolveEnv merges environment variables from env_file and [env] into
+// a single map. Values in [env] take precedence over values from env_file.
+func (c *Config) ResolveEnv(configDir string) (map[string]string, error) {
+	env := make(map[string]string)
+
+	// Load from env_file first (lower precedence).
+	if c.EnvFile != "" {
+		path := c.EnvFile
+		if !strings.HasPrefix(path, "/") {
+			path = configDir + "/" + path
+		}
+		fileEnv, err := loadEnvFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("loading env_file %q: %w", c.EnvFile, err)
+		}
+		for k, v := range fileEnv {
+			env[k] = v
+		}
+	}
+
+	// Overlay [env] table (higher precedence).
+	for k, v := range c.Env {
+		env[k] = v
+	}
+
+	return env, nil
+}
+
+// loadEnvFile parses a KEY=VALUE file, skipping comments and empty lines.
+func loadEnvFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		value = strings.Trim(value, `"'`)
+		data[key] = value
+	}
+	return data, scanner.Err()
 }
