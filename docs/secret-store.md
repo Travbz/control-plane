@@ -1,142 +1,128 @@
 # Secret Store
 
-The secret store is a local, file-backed key-value store for credentials. It holds the real values of all secrets referenced in `sandbox.toml`.
+The secret store is a pluggable system for credential management. Multiple backends implement the same `secrets.Store` interface, so the orchestrator doesn't care where secrets come from.
 
-Source: `pkg/secrets/store.go`
+## Interface
 
-## How it works
-
-```mermaid
-flowchart LR
-    CLI["control-plane secrets add"] -->|Set| Store[Store struct]
-    Store -->|persist| File["~/.control-plane/secrets.json"]
-    File -->|load on init| Store
-    Orch[Orchestrator] -->|Get| Store
-```
-
-The store is a Go struct with an in-memory `map[string]string` and a backing JSON file. Every write operation (Set, Delete) persists the full map to disk immediately.
-
-### Directory layout
-
-```
-~/.control-plane/
-└── secrets.json     # JSON map of name -> value
-```
-
-The directory is created with `0700` permissions (owner-only access). The file is written with `0600` permissions.
-
-### File format
-
-```json
-{
-  "anthropic_key": "sk-ant-api03-real-key-here",
-  "github_token": "ghp_abc123def456",
-  "ssh_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+```go
+type Store interface {
+    Get(name string) (string, error)
+    Set(name, value string) error
+    Delete(name string) error
+    List() ([]string, error)
 }
 ```
 
-Plain JSON. Keys are secret names (matching `sandbox.toml` sections). Values are the raw secret strings.
+## Backends
 
-## Operations
+```mermaid
+flowchart LR
+    Orch[Orchestrator] --> IF{secrets.Store}
+    IF -->|local dev| FS[FileStore<br/>JSON file]
+    IF -->|CI / containers| ES[EnvStore<br/>env vars]
+    IF -->|multi-tenant| DS[DelegatedStore<br/>AWS SM / Vault]
 
-### NewStore(dir)
-
-Opens or creates the store at the given directory path. If `secrets.json` exists, it's loaded into memory. If not, the store starts empty.
-
-```go
-store, err := secrets.NewStore(filepath.Join(home, ".control-plane"))
+    style IF fill:#333,stroke:#999,color:#fff
 ```
 
-### Set(name, value)
+### FileStore
 
-Stores a secret value. Overwrites if the name already exists. Persists to disk immediately.
+Source: `pkg/secrets/store.go`
 
-```go
-err := store.Set("anthropic_key", "sk-ant-api03-real-key")
+The default for local development. A JSON file in a user-only directory.
+
+```
+~/.config/control-plane/secrets/
+└── secrets.json     # {"name": "value", ...}
 ```
 
-### Get(name)
-
-Returns the secret value. Returns an error if the name doesn't exist.
-
-```go
-value, err := store.Get("anthropic_key")
-// value = "sk-ant-api03-real-key"
-```
-
-### Delete(name)
-
-Removes a secret from the store. Persists to disk immediately. Deleting a non-existent key is not an error (it's a no-op that re-persists).
+- Directory: `0700` permissions
+- File: `0600` permissions
+- Thread-safe (`sync.RWMutex`)
+- Persists on every Set/Delete
 
 ```go
-err := store.Delete("anthropic_key")
+store, err := secrets.NewFileStore("~/.config/control-plane/secrets")
 ```
 
-### List()
+### EnvStore
 
-Returns all secret names (not values).
+Source: `pkg/secrets/env.go`
+
+Read-only backend that reads secrets from environment variables or a `.env` file. Good for CI pipelines and containerized deployments.
+
+Secret names are uppercased and prefixed. `Get("anthropic_key")` checks `SECRET_ANTHROPIC_KEY`.
 
 ```go
-names := store.List()
-// ["anthropic_key", "github_token"]
+store, err := secrets.NewEnvStore("/path/to/.env", "SECRET_")
 ```
 
-## Thread safety
+- Env vars take precedence over `.env` file values
+- `Set` and `Delete` work in-memory only (not persisted)
+- `.env` file loaded once at construction
 
-The store uses a `sync.RWMutex`:
-- `Get` and `List` take a read lock
-- `Set` and `Delete` take a write lock
+### DelegatedStore
 
-This means multiple goroutines can read concurrently, but writes are exclusive. In practice, the CLI is single-threaded, so this is a safeguard rather than a necessity.
+Source: `pkg/secrets/delegated.go`
+
+For multi-tenant production. Fetches secrets from a customer's own external vault at runtime. The control plane never stores customer secrets.
+
+```mermaid
+flowchart LR
+    CP[control-plane] -->|"runtime fetch"| DS[DelegatedStore]
+    DS -->|"GetSecretValue"| AWS[AWS Secrets Manager]
+    DS -->|"GET /v1/secret/data/*"| Vault[HashiCorp Vault]
+
+    style DS fill:#333,stroke:#999,color:#fff
+```
+
+Supported backends:
+
+| Type | Auth | How it works |
+|---|---|---|
+| `aws_sm` | STS AssumeRole (cross-account) | HTTP API with SigV4 signing |
+| `vault` | Token auth | KV v2 HTTP API |
+
+```go
+store, err := secrets.NewDelegatedStore(secrets.DelegatedConfig{
+    Type:    "aws_sm",
+    Region:  "us-east-1",
+    RoleARN: "arn:aws:iam::role/customer-secrets",
+})
+```
+
+Features:
+- **Short-lived cache** (30s TTL) to avoid hammering external vaults
+- **Read-only** -- `Set`, `Delete`, `List` return errors. Customers manage their own vaults.
+- **Customer-scoped** -- each customer's profile can define a different `SecretsProviderConfig`
 
 ## CLI commands
 
-### Add a secret
-
 ```bash
-control-plane secrets add <name>
-```
+# Add a secret (FileStore only)
+control-plane secrets add --name anthropic_key --value "sk-ant-..."
 
-Reads the value from stdin (or prompts interactively). The `setup.sh` script pipes values in:
-
-```bash
-echo "sk-ant-api03-real-key" | control-plane secrets add anthropic_key
-```
-
-### List secrets
-
-```bash
+# List secret names
 control-plane secrets list
+
+# Remove a secret
+control-plane secrets rm --name old_key
 ```
-
-Prints secret names, one per line. Never prints values.
-
-### Remove a secret
-
-```bash
-control-plane secrets remove <name>
-```
-
-Removes the secret from the store.
-
-## Future: age encryption
-
-The current implementation stores secrets in plaintext JSON. This is fine for local development where the filesystem is trusted, but not ideal for shared machines or CI environments.
-
-The planned upgrade path:
-
-1. Generate an age keypair at init time, store the private key in the OS keychain
-2. Encrypt each value with the age public key before writing to JSON
-3. Decrypt on read using the private key from the keychain
-4. The file format changes from `{"name": "value"}` to `{"name": "age-encrypted-blob"}`
-
-The `Store` interface won't change. The encryption is transparent to the rest of the codebase.
 
 ## How the orchestrator uses it
 
 During `Up`, the orchestrator calls `store.Get(secretName)` for each secret in `sandbox.toml`:
 
-- **inject mode**: The returned value is set directly as an env var in the sandbox
-- **proxy mode**: The returned value is sent to the llm-proxy's session registry (never enters the sandbox)
+- **inject mode**: returned value is set as an env var in the sandbox
+- **proxy mode**: returned value is sent to llm-proxy's session registry (never enters sandbox)
 
-If any `Get` fails (secret not in store), the `Up` command aborts before provisioning anything.
+If any `Get` fails, the `up` command aborts before provisioning.
+
+## Future: age encryption
+
+The FileStore currently uses plaintext JSON. The planned upgrade:
+
+1. Generate an `age` keypair at init time
+2. Encrypt each value before writing to JSON
+3. Decrypt on read
+4. Interface stays the same -- encryption is transparent

@@ -48,7 +48,7 @@ func secretsAdd(args []string, logger *log.Logger) error {
 		sDir = home + "/.config/control-plane/secrets"
 	}
 
-	store, err := secrets.NewStore(sDir)
+	store, err := secrets.NewFileStore(sDir)
 	if err != nil {
 		return fmt.Errorf("opening secret store: %w", err)
 	}
@@ -80,7 +80,7 @@ func secretsRm(args []string, logger *log.Logger) error {
 		sDir = home + "/.config/control-plane/secrets"
 	}
 
-	store, err := secrets.NewStore(sDir)
+	store, err := secrets.NewFileStore(sDir)
 	if err != nil {
 		return fmt.Errorf("opening secret store: %w", err)
 	}
@@ -107,12 +107,15 @@ func secretsList(args []string, _ *log.Logger) error {
 		sDir = home + "/.config/control-plane/secrets"
 	}
 
-	store, err := secrets.NewStore(sDir)
+	store, err := secrets.NewFileStore(sDir)
 	if err != nil {
 		return fmt.Errorf("opening secret store: %w", err)
 	}
 
-	names := store.List()
+	names, err := store.List()
+	if err != nil {
+		return fmt.Errorf("listing secrets: %w", err)
+	}
 	if len(names) == 0 {
 		fmt.Println("No secrets stored")
 		return nil

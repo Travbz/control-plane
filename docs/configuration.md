@@ -1,41 +1,70 @@
 # Configuration Reference
 
-All sandbox configuration lives in a single `sandbox.toml` file. The control plane reads this file on every `up` command.
+All sandbox configuration lives in a single `sandbox.toml` file. The control plane reads this on every `up` command.
 
 ## Full schema
 
 ```toml
 # Required. Selects the provisioner backend.
-# "docker" - Docker Engine API (local dev, Raspberry Pi)
-# "unikraft" - kraft.cloud REST API (macOS, cloud)
-sandbox_mode = "docker"
+sandbox_mode = "docker"    # "docker", "fly", or "unikraft"
 
-# Required. Container image or Unikraft image reference.
+# Required. Container image or VM image reference.
 image = "sandbox-image:latest"
 
 # LLM proxy configuration.
 [proxy]
-addr = ":8090"    # Listen address for the proxy (default: ":8090")
+addr = ":8090"
 
 # Agent configuration.
 [agent]
-command = "my-agent"       # Required. Binary or script to execute.
-args = ["--flag", "value"] # Optional. Arguments passed to the command.
-user = "agent"             # Optional. Unix user to run as (default: "agent").
-workdir = "/workspace"     # Optional. Working directory (default: "/workspace").
+command = "my-agent"
+args = ["--flag", "value"]
+user = "agent"
+workdir = "/workspace"
 
-# Secrets. Each key under [secrets] is the secret name in the store.
-[secrets.my_secret]
-mode = "proxy"              # Required. "proxy" or "inject".
-env_var = "ANTHROPIC_API_KEY" # Required. Env var name in the sandbox.
-provider = "anthropic"      # Required for proxy mode. Provider name.
-upstream_url = ""           # Optional. Override provider default URL.
+# Plain environment variables (no secret management).
+[env]
+LOG_LEVEL = "debug"
+NODE_ENV = "production"
 
-# Shared directories. Each [[shared_dirs]] entry is a bind mount.
+# Load env vars from a file (lower precedence than [env]).
+env_file = ".env"
+
+# Secrets. Each key maps to a name in the secret store.
+[secrets.my_llm_key]
+mode = "proxy"
+env_var = "ANTHROPIC_API_KEY"
+provider = "anthropic"
+
+[secrets.my_token]
+mode = "inject"
+env_var = "GITHUB_TOKEN"
+
+# Shared directories (bind mounts).
 [[shared_dirs]]
-host_path = "./workspace"   # Required. Path on the host (relative or absolute).
-guest_path = "/workspace"   # Required. Mount point inside the sandbox.
-read_only = false           # Optional. Default: false.
+host_path = "./workspace"
+guest_path = "/workspace"
+read_only = false
+
+# Container resource limits.
+[resources]
+memory = "512m"
+cpus = "1"
+
+# MCP tool sidecars.
+[[tools]]
+name = "echo"
+image = "ghcr.io/yourorg/tool-echo:latest"
+transport = "http"
+port = 8080
+
+[tools.env]
+API_KEY = "inject:some_secret"
+
+# Network restrictions.
+[network]
+allowed_hosts = ["api.anthropic.com", "*.github.com"]
+proxy_port = 3128
 ```
 
 ## Field reference
@@ -44,8 +73,9 @@ read_only = false           # Optional. Default: false.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `sandbox_mode` | string | yes | -- | `"docker"` or `"unikraft"` |
+| `sandbox_mode` | string | yes | -- | `"docker"`, `"fly"`, or `"unikraft"` |
 | `image` | string | yes | -- | Container or VM image reference |
+| `env_file` | string | no | -- | Path to a `.env` file (KEY=VALUE format) |
 
 ### [proxy]
 
@@ -62,9 +92,21 @@ read_only = false           # Optional. Default: false.
 | `user` | string | no | `"agent"` | Unix user the agent runs as |
 | `workdir` | string | no | `"/workspace"` | Working directory inside the sandbox |
 
+### [env]
+
+A flat map of environment variables injected directly into the sandbox. No secret management -- these are plain key-value pairs.
+
+```toml
+[env]
+LOG_LEVEL = "debug"
+DATABASE_URL = "postgres://localhost/mydb"
+```
+
+Values from `env_file` are loaded first, then `[env]` values are overlaid (higher precedence).
+
 ### [secrets.*]
 
-Each secret is a named section under `[secrets]`. The key (e.g., `anthropic_key` in `[secrets.anthropic_key]`) is used to look up the value in the secret store.
+Each secret is a named section under `[secrets]`. The key (e.g., `anthropic_key` in `[secrets.anthropic_key]`) is the lookup name in the secret store.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -75,30 +117,58 @@ Each secret is a named section under `[secrets]`. The key (e.g., `anthropic_key`
 
 ### [[shared_dirs]]
 
-Each `[[shared_dirs]]` entry defines a host-to-guest directory mount.
+Each entry is a host-to-guest bind mount.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `host_path` | string | yes | -- | Path on the host machine |
+| `host_path` | string | yes | -- | Path on the host (relative paths resolved to config dir) |
 | `guest_path` | string | yes | -- | Mount point inside the sandbox |
-| `read_only` | bool | no | `false` | Whether the mount is read-only |
+| `read_only` | bool | no | `false` | Read-only mount |
+
+### [resources]
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `memory` | string | no | -- | Memory limit (e.g. `"512m"`, `"1g"`) |
+| `cpus` | string | no | -- | CPU limit (e.g. `"0.5"`, `"2"`) |
+
+### [[tools]]
+
+Each entry defines an MCP tool sidecar container started on the sandbox network.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | yes | -- | Tool identifier (used as container name) |
+| `image` | string | yes | -- | Docker image for the tool |
+| `transport` | string | yes | -- | `"http"` or `"stdio"` |
+| `port` | int | http only | -- | Port the tool listens on |
+| `env` | map | no | -- | Tool-specific env vars. `"inject:name"` resolves from secret store. |
+
+### [network]
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `allowed_hosts` | string[] | no | `[]` | Hosts the sandbox may reach. Empty = unrestricted. |
+| `proxy_port` | int | no | `3128` | Allowlist proxy listen port |
+
+Supports exact match (`"api.anthropic.com"`) and wildcard subdomains (`"*.github.com"`).
 
 ## Validation rules
 
-The config parser (`pkg/config/config.go`) enforces:
+The config parser enforces:
 
-1. `sandbox_mode` must be `"docker"` or `"unikraft"`. Cannot be empty.
-2. `image` cannot be empty.
-3. `agent.command` cannot be empty.
-4. Every secret must have `mode` set to `"proxy"` or `"inject"`.
-5. Every secret must have `env_var` set.
-6. Secrets with `mode = "proxy"` must have `provider` set.
+1. `sandbox_mode` must be `"docker"`, `"fly"`, or `"unikraft"`
+2. `image` cannot be empty
+3. `agent.command` cannot be empty
+4. Every secret must have `mode` set to `"proxy"` or `"inject"`
+5. Every secret must have `env_var` set
+6. Secrets with `mode = "proxy"` must have `provider` set
 
-If validation fails, the `up` command exits with an error before any provisioning happens.
+If validation fails, the `up` command exits before provisioning.
 
 ## Example configurations
 
-### Anthropic only (proxy mode)
+### Minimal (hello world)
 
 ```toml
 sandbox_mode = "docker"
@@ -108,8 +178,8 @@ image = "sandbox-image:latest"
 addr = ":8090"
 
 [agent]
-command = "python3"
-args = ["agent.py"]
+command = "bash"
+args = ["/workspace/agent.sh"]
 
 [secrets.anthropic_key]
 mode = "proxy"
@@ -117,21 +187,29 @@ env_var = "ANTHROPIC_API_KEY"
 provider = "anthropic"
 
 [[shared_dirs]]
-host_path = "./workspace"
+host_path = "."
 guest_path = "/workspace"
 ```
 
-### Multi-provider
+### Full production config
 
 ```toml
-sandbox_mode = "docker"
-image = "sandbox-image:latest"
+sandbox_mode = "fly"
+image = "ghcr.io/yourorg/sandbox-image:latest"
 
 [proxy]
 addr = ":8090"
 
 [agent]
-command = "my-agent"
+command = "/usr/local/bin/agent"
+user = "agent"
+workdir = "/workspace"
+
+[env]
+LOG_LEVEL = "info"
+NODE_ENV = "production"
+
+env_file = ".env.production"
 
 [secrets.anthropic_key]
 mode = "proxy"
@@ -147,76 +225,35 @@ provider = "openai"
 mode = "inject"
 env_var = "GITHUB_TOKEN"
 
-[[shared_dirs]]
-host_path = "./workspace"
-guest_path = "/workspace"
+[resources]
+memory = "1g"
+cpus = "2"
+
+[[tools]]
+name = "gmail"
+image = "ghcr.io/yourorg/tool-gmail:latest"
+transport = "http"
+port = 8080
+
+[tools.env]
+GOOGLE_API_KEY = "inject:google_api_key"
+
+[[tools]]
+name = "discord"
+image = "ghcr.io/yourorg/tool-discord:latest"
+transport = "http"
+port = 8080
+
+[tools.env]
+DISCORD_TOKEN = "inject:discord_token"
+
+[network]
+allowed_hosts = [
+    "api.anthropic.com",
+    "api.openai.com",
+    "*.googleapis.com",
+    "discord.com",
+    "*.discord.com"
+]
+proxy_port = 3128
 ```
-
-### Ollama local
-
-```toml
-sandbox_mode = "docker"
-image = "sandbox-image:latest"
-
-[proxy]
-addr = ":8090"
-
-[agent]
-command = "python3"
-args = ["local_agent.py"]
-
-[secrets.ollama]
-mode = "proxy"
-env_var = "OLLAMA_API_KEY"
-provider = "ollama"
-
-[[shared_dirs]]
-host_path = "./workspace"
-guest_path = "/workspace"
-```
-
-For Ollama, the proxy doesn't inject any auth header (Ollama doesn't need one). The value of `env_var` gets a session token, but the agent doesn't actually use it for auth -- the `OLLAMA_HOST` env var is what matters, and the control plane sets that automatically.
-
-### Inject only (no proxy)
-
-```toml
-sandbox_mode = "docker"
-image = "sandbox-image:latest"
-
-[agent]
-command = "my-script.sh"
-
-[secrets.api_key]
-mode = "inject"
-env_var = "MY_API_KEY"
-
-[secrets.db_password]
-mode = "inject"
-env_var = "DATABASE_URL"
-
-[[shared_dirs]]
-host_path = "./workspace"
-guest_path = "/workspace"
-```
-
-No `[proxy]` section needed if you're not using proxy mode. The llm-proxy won't be started.
-
-### Unikraft (cloud deployment)
-
-```toml
-sandbox_mode = "unikraft"
-image = "my-registry.com/sandbox-image:latest"
-
-[proxy]
-addr = ":8090"
-
-[agent]
-command = "agent"
-
-[secrets.anthropic_key]
-mode = "proxy"
-env_var = "ANTHROPIC_API_KEY"
-provider = "anthropic"
-```
-
-Requires `UKC_TOKEN` to be set in the host environment for kraft.cloud API auth. Shared directories are not supported in Unikraft mode (VMs don't have bind mounts).

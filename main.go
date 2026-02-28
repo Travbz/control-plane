@@ -29,6 +29,8 @@ func main() {
 		err = cmd.Status(args, logger)
 	case "secrets":
 		err = cmd.Secrets(args, logger)
+	case "serve":
+		err = cmd.Serve(args, logger)
 	case "help", "--help", "-h":
 		usage()
 		return
@@ -55,6 +57,7 @@ Commands:
   down      Stop and destroy a sandbox
   status    Show sandbox status
   secrets   Manage the secret store (add, rm, list)
+  serve     Run as an HTTP server (for api-gateway integration)
   help      Show this help message
 
 Run 'control-plane <command> --help' for command-specific options.

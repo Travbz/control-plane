@@ -8,24 +8,24 @@ import (
 	"sync"
 )
 
-// Store is an encrypted secret store backed by JSON files.
-// Secrets are stored as name->value pairs in a JSON file.
-// In a production implementation this would use age encryption;
-// for now, secrets are stored in plaintext JSON in a user-only-readable directory.
-type Store struct {
+// FileStore is a secret store backed by a plaintext JSON file in a
+// user-only-readable directory. Implements the Store interface.
+// In a production deployment, consider using EnvStore, AWSStore, or
+// DelegatedStore instead.
+type FileStore struct {
 	mu   sync.RWMutex
 	dir  string
 	file string
 	data map[string]string
 }
 
-// NewStore creates or opens a secret store at the given directory.
-func NewStore(dir string) (*Store, error) {
+// NewFileStore creates or opens a file-backed secret store at the given directory.
+func NewFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("creating secrets dir: %w", err)
 	}
 
-	s := &Store{
+	s := &FileStore{
 		dir:  dir,
 		file: filepath.Join(dir, "secrets.json"),
 		data: make(map[string]string),
@@ -45,17 +45,8 @@ func NewStore(dir string) (*Store, error) {
 	return s, nil
 }
 
-// Set stores a secret value.
-func (s *Store) Set(name, value string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.data[name] = value
-	return s.persist()
-}
-
 // Get retrieves a secret value. Returns an error if not found.
-func (s *Store) Get(name string) (string, error) {
+func (s *FileStore) Get(name string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -66,8 +57,17 @@ func (s *Store) Get(name string) (string, error) {
 	return v, nil
 }
 
+// Set stores a secret value.
+func (s *FileStore) Set(name, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data[name] = value
+	return s.persist()
+}
+
 // Delete removes a secret.
-func (s *Store) Delete(name string) error {
+func (s *FileStore) Delete(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -76,7 +76,7 @@ func (s *Store) Delete(name string) error {
 }
 
 // List returns all secret names (not values).
-func (s *Store) List() []string {
+func (s *FileStore) List() ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -84,11 +84,11 @@ func (s *Store) List() []string {
 	for name := range s.data {
 		names = append(names, name)
 	}
-	return names
+	return names, nil
 }
 
 // persist writes the current secret data to disk.
-func (s *Store) persist() error {
+func (s *FileStore) persist() error {
 	raw, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling secrets: %w", err)

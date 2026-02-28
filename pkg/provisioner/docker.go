@@ -41,7 +41,7 @@ func NewDockerProvisioner(host string) *DockerProvisioner {
 	}
 }
 
-// Create creates a new Docker container.
+// Create creates a new Docker container with security hardening.
 func (d *DockerProvisioner) Create(ctx context.Context, opts CreateOpts) (*Sandbox, error) {
 	// Build environment variables list.
 	var env []string
@@ -59,16 +59,49 @@ func (d *DockerProvisioner) Create(ctx context.Context, opts CreateOpts) (*Sandb
 		binds = append(binds, bind)
 	}
 
+	// Determine network mode.
+	networkMode := "bridge"
+	if opts.NetworkID != "" {
+		networkMode = opts.NetworkID
+	}
+
+	// Build HostConfig with security hardening.
+	hostConfig := map[string]any{
+		"Binds":       binds,
+		"NetworkMode": networkMode,
+		// Add host.docker.internal so sandbox can reach the proxy.
+		"ExtraHosts": []string{"host.docker.internal:host-gateway"},
+		// Security hardening: drop all capabilities.
+		"CapDrop": []string{"ALL"},
+		// Prevent privilege escalation.
+		"SecurityOpt": []string{"no-new-privileges"},
+		// Read-only root filesystem with writable tmpfs mounts.
+		"ReadonlyRootfs": true,
+		"Tmpfs": map[string]string{
+			"/tmp": "rw,noexec,nosuid,size=256m",
+			"/run": "rw,noexec,nosuid,size=64m",
+		},
+	}
+
+	// Apply resource limits if specified.
+	if opts.Memory != "" {
+		memBytes, err := parseMemory(opts.Memory)
+		if err == nil {
+			hostConfig["Memory"] = memBytes
+		}
+	}
+	if opts.CPUs != "" {
+		nanoCPUs, err := parseCPUs(opts.CPUs)
+		if err == nil {
+			hostConfig["NanoCpus"] = nanoCPUs
+		}
+	}
+
 	// Docker Engine API create container payload.
 	body := map[string]any{
 		"Image": opts.Image,
 		"Env":   env,
-		"HostConfig": map[string]any{
-			"Binds":       binds,
-			"NetworkMode": "bridge",
-			// Add host.docker.internal so sandbox can reach the proxy.
-			"ExtraHosts": []string{"host.docker.internal:host-gateway"},
-		},
+		"HostConfig": hostConfig,
 		"Labels": map[string]string{
 			"managed-by": "control-plane",
 		},
@@ -263,4 +296,85 @@ func (d *DockerProvisioner) apiDelete(ctx context.Context, path string) (*http.R
 		return nil, err
 	}
 	return d.client.Do(req)
+}
+
+// parseMemory converts a human-readable memory string (e.g. "512m", "1g") to bytes.
+func parseMemory(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty memory string")
+	}
+
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(s, "g") || strings.HasSuffix(s, "G"):
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "m") || strings.HasSuffix(s, "M"):
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "k") || strings.HasSuffix(s, "K"):
+		multiplier = 1024
+		s = s[:len(s)-1]
+	}
+
+	var n int64
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, fmt.Errorf("parsing memory %q: %w", s, err)
+	}
+	return n * multiplier, nil
+}
+
+// parseCPUs converts a CPU limit string (e.g. "0.5", "2") to Docker NanoCPUs.
+func parseCPUs(s string) (int64, error) {
+	var f float64
+	if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+		return 0, fmt.Errorf("parsing cpus %q: %w", s, err)
+	}
+	return int64(f * 1e9), nil
+}
+
+// CreateNetwork creates a Docker bridge network and returns its ID.
+func (d *DockerProvisioner) CreateNetwork(ctx context.Context, name string) (string, error) {
+	body := map[string]any{
+		"Name":   name,
+		"Driver": "bridge",
+		"Labels": map[string]string{
+			"managed-by": "control-plane",
+		},
+	}
+
+	resp, err := d.apiPost(ctx, "/networks/create", body)
+	if err != nil {
+		return "", fmt.Errorf("docker create network: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		errBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("docker create network: status %d: %s", resp.StatusCode, errBody)
+	}
+
+	var result struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("docker create network: decode: %w", err)
+	}
+	return result.ID, nil
+}
+
+// RemoveNetwork removes a Docker network by ID.
+func (d *DockerProvisioner) RemoveNetwork(ctx context.Context, id string) error {
+	resp, err := d.apiDelete(ctx, fmt.Sprintf("/networks/%s", id))
+	if err != nil {
+		return fmt.Errorf("docker remove network: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		errBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("docker remove network: status %d: %s", resp.StatusCode, errBody)
+	}
+	return nil
 }

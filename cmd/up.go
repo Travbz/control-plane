@@ -43,7 +43,7 @@ func Up(args []string, logger *log.Logger) error {
 		sDir = home + "/.config/control-plane/secrets"
 	}
 
-	store, err := secrets.NewStore(sDir)
+	store, err := secrets.NewFileStore(sDir)
 	if err != nil {
 		return fmt.Errorf("opening secret store: %w", err)
 	}
