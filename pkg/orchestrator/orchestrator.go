@@ -24,6 +24,7 @@ type Orchestrator struct {
 	provisioner provisioner.Provisioner
 	secrets     secrets.Store
 	proxyAddr   string
+	proxyToken  string
 	logger      *log.Logger
 	httpClient  *http.Client
 }
@@ -41,6 +42,7 @@ func New(
 		provisioner: prov,
 		secrets:     secretStore,
 		proxyAddr:   proxyAddr,
+		proxyToken:  os.Getenv("GHOSTPROXY_ADMIN_TOKEN"),
 		logger:      logger,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -183,6 +185,12 @@ func (o *Orchestrator) Up(ctx context.Context, name string) (*provisioner.Sandbo
 	}
 
 	// 9. Register proxy sessions for proxied secrets.
+	if len(sessionTokens) > 0 && o.proxyToken == "" {
+		o.cleanupToolContainers(ctx, toolContainerIDs)
+		_ = o.provisioner.Destroy(ctx, sandbox.ID)
+		o.cleanupNetwork(ctx, networkID)
+		return nil, fmt.Errorf("proxy-mode secrets require GHOSTPROXY_ADMIN_TOKEN")
+	}
 	for secretName, token := range sessionTokens {
 		secretCfg := o.cfg.Secrets[secretName]
 
@@ -221,6 +229,12 @@ func (o *Orchestrator) Up(ctx context.Context, name string) (*provisioner.Sandbo
 // Down stops and destroys a sandbox by ID, revoking any proxy sessions.
 func (o *Orchestrator) Down(ctx context.Context, id string) error {
 	o.logger.Printf("stopping sandbox %s", id)
+
+	if o.proxyToken != "" {
+		if err := o.revokeSandboxSessions(id); err != nil {
+			o.logger.Printf("warning: revoke sandbox sessions: %v", err)
+		}
+	}
 
 	if err := o.provisioner.Stop(ctx, id); err != nil {
 		o.logger.Printf("warning: stop sandbox: %v", err)
@@ -347,12 +361,10 @@ func (o *Orchestrator) registerProxySession(token, provider, apiKey, upstreamURL
 	url := fmt.Sprintf("http://localhost%s/v1/sessions", o.proxyAddr)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return fmt.Errorf("building register request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if adminToken := os.Getenv("GHOSTPROXY_ADMIN_TOKEN"); adminToken != "" {
-		req.Header.Set("Authorization", "Bearer "+adminToken)
-	}
+	req.Header.Set("Authorization", "Bearer "+o.proxyToken)
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("posting to proxy: %w", err)
@@ -374,9 +386,7 @@ func (o *Orchestrator) revokeProxySession(token string) error {
 	if err != nil {
 		return err
 	}
-	if adminToken := os.Getenv("GHOSTPROXY_ADMIN_TOKEN"); adminToken != "" {
-		req.Header.Set("Authorization", "Bearer "+adminToken)
-	}
+	req.Header.Set("Authorization", "Bearer "+o.proxyToken)
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
@@ -384,5 +394,26 @@ func (o *Orchestrator) revokeProxySession(token string) error {
 	}
 	defer resp.Body.Close()
 
+	return nil
+}
+
+// revokeSandboxSessions revokes all registered sessions for the given sandbox.
+func (o *Orchestrator) revokeSandboxSessions(sandboxID string) error {
+	url := fmt.Sprintf("http://localhost%s/v1/sandboxes/%s/sessions", o.proxyAddr, sandboxID)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+o.proxyToken)
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revoking sandbox sessions: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("proxy returned status %d", resp.StatusCode)
+	}
 	return nil
 }

@@ -41,6 +41,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CP_BIN="$SCRIPT_DIR/build/control-plane"
 PROXY_BIN="$SCRIPT_DIR/../llm-proxy/build/llm-proxy"
 SECRETS_DIR="$(mktemp -d)"
+ADMIN_TOKEN="e2e-admin-token"
 
 # ─── Step 0: Verify prerequisites ────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ log "Secrets file OK"
 # ─── Step 2: Start the LLM proxy ─────────────────────────────────────────────
 
 log "Starting llm-proxy on :18090..."
-"$PROXY_BIN" -addr :18090 &
+GHOSTPROXY_ADMIN_TOKEN="$ADMIN_TOKEN" "$PROXY_BIN" -addr :18090 &
 PROXY_PID=$!
 sleep 1
 
@@ -85,6 +86,7 @@ log "llm-proxy is healthy"
 log "Registering test session with llm-proxy..."
 
 REGISTER_RESP=$(curl -sf -X POST http://localhost:18090/v1/sessions \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"token":"e2e-test-token","provider":"anthropic","api_key":"sk-ant-test-key-e2e","sandbox_id":"e2e-sandbox"}')
 
@@ -93,8 +95,8 @@ log "Session registered OK"
 
 # ─── Step 4: Verify session is listed ─────────────────────────────────────────
 
-SESSIONS=$(curl -sf http://localhost:18090/v1/sessions)
-echo "$SESSIONS" | grep -q "e2e-test-token" || fail "Session not in list: $SESSIONS"
+SESSIONS=$(curl -sf http://localhost:18090/v1/sessions -H "Authorization: Bearer $ADMIN_TOKEN")
+echo "$SESSIONS" | grep -q '"sandbox_id":"e2e-sandbox"' || fail "Session metadata not in list: $SESSIONS"
 log "Session appears in list OK"
 
 # ─── Step 5: Test proxy authentication ────────────────────────────────────────
@@ -119,7 +121,8 @@ log "Proxy auth pass-through OK (upstream returned $PROXY_RESP as expected with 
 # ─── Step 6: Revoke the session ──────────────────────────────────────────────
 
 log "Revoking session..."
-REVOKE_RESP=$(curl -sf -X DELETE http://localhost:18090/v1/sessions/e2e-test-token)
+REVOKE_RESP=$(curl -sf -X DELETE http://localhost:18090/v1/sessions/e2e-test-token \
+    -H "Authorization: Bearer $ADMIN_TOKEN")
 echo "$REVOKE_RESP" | grep -q '"revoked"' || fail "Session revocation failed: $REVOKE_RESP"
 
 # Verify revoked — should now get 401.
@@ -161,7 +164,7 @@ secrets:
     env_var: GITHUB_TOKEN
 EOF
 
-"$CP_BIN" up --config /tmp/e2e-sandbox.yaml --name e2e-sandbox --secrets-provider env --secrets-dir "$ENV_FILE" && \
+GHOSTPROXY_ADMIN_TOKEN="$ADMIN_TOKEN" "$CP_BIN" up --config /tmp/e2e-sandbox.yaml --name e2e-sandbox --secrets-provider env --secrets-dir "$ENV_FILE" && \
     log "Sandbox created and started OK" || \
     warn "Sandbox creation may have failed (expected if Docker socket permissions differ)"
 

@@ -62,7 +62,7 @@ sequenceDiagram
     CP->>CP: GenerateSessionToken()
     Note over CP: token = "a1b2c3d4..." (32 random hex bytes)
 
-    CP->>Proxy: POST /v1/sessions<br/>token=a1b2c3d4, provider=anthropic,<br/>api_key=sk-ant-api03-real-key
+    CP->>Proxy: POST /v1/sessions<br/>Authorization: Bearer admin-token<br/>token=a1b2c3d4, provider=anthropic,<br/>api_key=sk-ant-api03-real-key
     Proxy-->>CP: 201 Created
 
     CP->>CP: Build env map:<br/>ANTHROPIC_API_KEY=a1b2c3d4<br/>ANTHROPIC_BASE_URL=http://host.docker.internal:8090

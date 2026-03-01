@@ -77,6 +77,12 @@ cd CommandGrid
 
 Builds GhostProxy, RootFS, and CommandGrid (binary: `./build/control-plane`), verifies credentials are configured (.env or Bitwarden), and drops a ready-to-run hello-world example in `my-first-sandbox/`. Fails with instructions if `anthropic_key` is not in `.env`, `SECRET_ANTHROPIC_KEY`, or Bitwarden.
 
+For proxy-mode secrets, set an admin token used for GhostProxy registry calls:
+
+```bash
+export GHOSTPROXY_ADMIN_TOKEN="change-me"
+```
+
 ### Manual setup
 
 ```bash
