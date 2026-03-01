@@ -32,3 +32,6 @@ result-*
 
 # Secrets (never commit)
 secrets.json
+
+# Legacy (setup no longer creates this)
+my-first-sandbox/
