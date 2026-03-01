@@ -1,6 +1,6 @@
 # Provisioners
 
-The control plane has a pluggable provisioner interface for creating and managing sandboxes. Three backends are implemented: Docker (local dev / Pi), Fly Machines (production / cloud), and Unikraft (micro-VMs).
+CommandGrid has a pluggable provisioner interface for creating and managing sandboxes. Three backends are implemented: Docker (local dev / Pi), Fly Machines (production / cloud), and Unikraft (micro-VMs).
 
 ## Interface
 
@@ -57,7 +57,7 @@ Talks to the Docker daemon over the Unix socket (`/var/run/docker.sock`). Uses r
 
 ```mermaid
 flowchart LR
-    CP[control-plane] -->|"HTTP over Unix socket"| Socket["/var/run/docker.sock"]
+    CP[CommandGrid] -->|"HTTP over Unix socket"| Socket["/var/run/docker.sock"]
     Socket --> Daemon[Docker Daemon]
     Daemon --> Container[Sandbox Container]
 ```
@@ -71,7 +71,7 @@ flowchart LR
 | Stop | `POST /containers/{id}/stop` | SIGTERM then SIGKILL |
 | Destroy | `DELETE /containers/{id}?force=true` | Removes container and filesystem |
 | Status | `GET /containers/{id}/json` | State, network info, IP |
-| List | `GET /containers/json?filters=...` | Filtered by `managed-by=control-plane` label |
+| List | `GET /containers/json?filters=...` | Filtered by `managed-by=CommandGrid` label |
 
 ### Security hardening
 
@@ -100,7 +100,7 @@ Talks to the Fly Machines REST API over HTTPS:
 
 ```mermaid
 flowchart LR
-    CP[control-plane] -->|"HTTPS + Bearer token"| API["api.machines.dev/v1"]
+    CP[CommandGrid] -->|"HTTPS + Bearer token"| API["api.machines.dev/v1"]
     API --> VM[Fly Machine<br/>Firecracker VM]
 ```
 

@@ -8,12 +8,12 @@ This is fine for single-agent workflows. It breaks down when you want agents to 
 
 ## Goal
 
-Add a discovery API to the control plane so sandboxes can query for other running agents and get enough metadata to establish communication. The control plane already tracks every sandbox (provisioner.List), so this is mostly about exposing that state through a new HTTP endpoint and injecting the right env vars so sandboxes know how to call it.
+Add a discovery API to CommandGrid so sandboxes can query for other running agents and get enough metadata to establish communication. CommandGrid already tracks every sandbox (provisioner.List), so this is mostly about exposing that state through a new HTTP endpoint and injecting the right env vars so sandboxes know how to call it.
 
 ## Non-goals
 
 - **Agent-to-agent transport.** This PRD covers discovery (who exists and where), not the communication channel itself. Agents can use HTTP, shared directories, or whatever fits once they have each other's coordinates.
-- **Orchestration / task assignment.** The control plane tells agents about each other. It does not decide who does what.
+- **Orchestration / task assignment.** CommandGrid tells agents about each other. It does not decide who does what.
 - **Authentication between agents.** Session tokens authenticate agents to the proxy. Inter-agent auth is a separate concern. We may revisit this, but v1 ships without it.
 - **Persistent agent registry.** Discovery is ephemeral. If a sandbox goes down, it disappears from the registry. No database.
 
@@ -24,8 +24,8 @@ Add a discovery API to the control plane so sandboxes can query for other runnin
 ```mermaid
 flowchart LR
     subgraph host [Host]
-        CP[control-plane]
-        Proxy[llm-proxy]
+        CP[CommandGrid]
+        Proxy[GhostProxy]
     end
 
     subgraph sandboxes [Sandboxes]
@@ -38,15 +38,15 @@ flowchart LR
     A -.-x|no path| B
 ```
 
-Agent A and Agent B have no awareness of each other. The control plane knows both exist (it created them), but that information is locked inside the host CLI.
+Agent A and Agent B have no awareness of each other. CommandGrid knows both exist (it created them), but that information is locked inside the host CLI.
 
 ### Proposed state
 
 ```mermaid
 flowchart LR
     subgraph host [Host]
-        CP[control-plane]
-        Proxy[llm-proxy]
+        CP[CommandGrid]
+        Proxy[GhostProxy]
         Disc[Discovery API :8091]
     end
 
@@ -62,7 +62,7 @@ flowchart LR
     A <-->|direct or shared_dirs| B
 ```
 
-The control plane exposes a lightweight HTTP discovery API. Sandboxes call it to learn about peers. Communication happens out of band (direct HTTP between containers, shared filesystem, etc).
+CommandGrid exposes a lightweight HTTP discovery API. Sandboxes call it to learn about peers. Communication happens out of band (direct HTTP between containers, shared filesystem, etc).
 
 ## API Design
 
@@ -89,7 +89,7 @@ Authorization: Bearer <session-token>
       "ip": "172.17.0.3",
       "labels": {
         "role": "reviewer",
-        "project": "control-plane"
+        "project": "CommandGrid"
       },
       "started_at": "2026-02-27T10:30:00Z"
     },
@@ -100,7 +100,7 @@ Authorization: Bearer <session-token>
       "ip": "172.17.0.4",
       "labels": {
         "role": "tester",
-        "project": "control-plane"
+        "project": "CommandGrid"
       },
       "started_at": "2026-02-27T10:31:00Z"
     }
@@ -124,7 +124,7 @@ Returns a single agent by ID.
   "ip": "172.17.0.3",
   "labels": {
     "role": "reviewer",
-    "project": "control-plane"
+    "project": "CommandGrid"
   },
   "started_at": "2026-02-27T10:30:00Z"
 }
@@ -147,7 +147,7 @@ Allows an agent to set labels on itself. Labels are key-value pairs that other a
 ```json
 {
   "role": "reviewer",
-  "project": "control-plane",
+  "project": "CommandGrid",
   "capabilities": "code-review,linting"
 }
 ```
@@ -188,7 +188,7 @@ type AgentRecord struct {
 }
 ```
 
-This is not persisted. When the control plane restarts, it rebuilds the registry by calling `provisioner.List()` and cross-referencing with active proxy sessions.
+This is not persisted. When CommandGrid restarts, it rebuilds the registry by calling `provisioner.List()` and cross-referencing with active proxy sessions.
 
 ### Relationship to existing types
 
@@ -213,7 +213,7 @@ Add optional `labels` to the agent config:
 [agent]
 command = "claude"
 args = ["--model", "sonnet"]
-labels = { role = "reviewer", project = "control-plane" }
+labels = { role = "reviewer", project = "CommandGrid" }
 ```
 
 These are the initial labels set at boot. The agent can update them at runtime via the API.
@@ -227,7 +227,7 @@ Add a `discovery` section to the proxy config:
 addr = ":8091"
 ```
 
-Default: `:8091`. The discovery API runs as a separate listener in the control-plane process (not inside llm-proxy — it needs access to the provisioner state).
+Default: `:8091`. The discovery API runs as a separate listener in the CommandGrid process (not inside GhostProxy — it needs access to the provisioner state).
 
 ## Environment Variables
 
@@ -294,7 +294,7 @@ pkg/
 
 ## Open Questions
 
-1. **Should agents be able to send messages through the control plane?** Right now discovery just provides coordinates. Agents have to figure out transport themselves. A simple `POST /v1/agents/{id}/messages` endpoint with a small mailbox could be useful, but it adds state and complexity.
+1. **Should agents be able to send messages through CommandGrid?** Right now discovery just provides coordinates. Agents have to figure out transport themselves. A simple `POST /v1/agents/{id}/messages` endpoint with a small mailbox could be useful, but it adds state and complexity.
 
 2. **Health checks.** The registry reflects provisioner state (container running vs stopped). Should we add application-level health? An agent could be running but hung. Heartbeat endpoint? Or is that the agent's problem?
 

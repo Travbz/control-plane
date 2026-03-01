@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All sandbox configuration lives in a single `sandbox.toml` file. The control plane reads this on every `up` command.
+All sandbox configuration lives in a single `sandbox.toml` file. CommandGrid reads this on every `up` command.
 
 ## Full schema
 
@@ -9,7 +9,7 @@ All sandbox configuration lives in a single `sandbox.toml` file. The control pla
 sandbox_mode = "docker"    # "docker", "fly", or "unikraft"
 
 # Required. Container image or VM image reference.
-image = "sandbox-image:latest"
+image = "RootFS:latest"
 
 # LLM proxy configuration.
 [proxy]
@@ -81,7 +81,7 @@ proxy_port = 3128
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `addr` | string | no | `":8090"` | Listen address for the llm-proxy |
+| `addr` | string | no | `":8090"` | Listen address for GhostProxy |
 
 ### [agent]
 
@@ -172,7 +172,7 @@ If validation fails, the `up` command exits before provisioning.
 
 ```toml
 sandbox_mode = "docker"
-image = "sandbox-image:latest"
+image = "RootFS:latest"
 
 [proxy]
 addr = ":8090"
@@ -195,7 +195,7 @@ guest_path = "/workspace"
 
 ```toml
 sandbox_mode = "fly"
-image = "ghcr.io/yourorg/sandbox-image:latest"
+image = "ghcr.io/yourorg/RootFS:latest"
 
 [proxy]
 addr = ":8090"

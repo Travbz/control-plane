@@ -32,7 +32,7 @@ Source: `pkg/secrets/store.go`
 The default for local development. A JSON file in a user-only directory.
 
 ```
-~/.config/control-plane/secrets/
+~/.config/CommandGrid/secrets/
 └── secrets.json     # {"name": "value", ...}
 ```
 
@@ -42,7 +42,7 @@ The default for local development. A JSON file in a user-only directory.
 - Persists on every Set/Delete
 
 ```go
-store, err := secrets.NewFileStore("~/.config/control-plane/secrets")
+store, err := secrets.NewFileStore("~/.config/CommandGrid/secrets")
 ```
 
 ### EnvStore
@@ -65,11 +65,11 @@ store, err := secrets.NewEnvStore("/path/to/.env", "SECRET_")
 
 Source: `pkg/secrets/delegated.go`
 
-For multi-tenant production. Fetches secrets from a customer's own external vault at runtime. The control plane never stores customer secrets.
+For multi-tenant production. Fetches secrets from a customer's own external vault at runtime. CommandGrid never stores customer secrets.
 
 ```mermaid
 flowchart LR
-    CP[control-plane] -->|"runtime fetch"| DS[DelegatedStore]
+    CP[CommandGrid] -->|"runtime fetch"| DS[DelegatedStore]
     DS -->|"GetSecretValue"| AWS[AWS Secrets Manager]
     DS -->|"GET /v1/secret/data/*"| Vault[HashiCorp Vault]
 
@@ -100,13 +100,13 @@ Features:
 
 ```bash
 # Add a secret (FileStore only)
-control-plane secrets add --name anthropic_key --value "sk-ant-..."
+CommandGrid secrets add --name anthropic_key --value "sk-ant-..."
 
 # List secret names
-control-plane secrets list
+CommandGrid secrets list
 
 # Remove a secret
-control-plane secrets rm --name old_key
+CommandGrid secrets rm --name old_key
 ```
 
 ## How the orchestrator uses it
@@ -114,7 +114,7 @@ control-plane secrets rm --name old_key
 During `Up`, the orchestrator calls `store.Get(secretName)` for each secret in `sandbox.toml`:
 
 - **inject mode**: returned value is set as an env var in the sandbox
-- **proxy mode**: returned value is sent to llm-proxy's session registry (never enters sandbox)
+- **proxy mode**: returned value is sent to GhostProxy's session registry (never enters sandbox)
 
 If any `Get` fails, the `up` command aborts before provisioning.
 

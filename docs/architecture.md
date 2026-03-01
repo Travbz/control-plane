@@ -1,6 +1,6 @@
 # Architecture
 
-The control plane is the orchestrator for the entire agent sandbox system. It reads configuration, manages secrets, provisions sandboxes, coordinates the LLM proxy, starts MCP tool sidecars, and optionally restricts outbound network access. This document covers the full architecture across all services.
+CommandGrid is the orchestrator for the entire agent sandbox system. It reads configuration, manages secrets, provisions sandboxes, coordinates GhostProxy, starts MCP tool sidecars, and optionally restricts outbound network access. This document covers the full architecture across all services.
 
 ## System overview
 
@@ -11,9 +11,9 @@ flowchart TB
 
     subgraph host [Host Machine]
         GW
-        CP[control-plane]
+        CP[CommandGrid]
         SecretStore["Secret Store<br/>(File / Env / AWS SM / Vault)"]
-        LLMProxy[llm-proxy :8090]
+        LLMProxy[GhostProxy :8090]
         AllowProxy[allowlist proxy :3128]
         Docker[Docker Daemon]
     end
@@ -52,9 +52,9 @@ flowchart TB
 
 | Service | Role | Runs on |
 |---|---|---|
-| **control-plane** | Orchestrator. Config, secrets, provisioning, tools, network policy. | Host (CLI or HTTP server) |
-| **llm-proxy** | Stateless reverse proxy. Token validation, credential injection, token metering. | Host (daemon) |
-| **sandbox-image** | Container image + entrypoint. Env stripping, privilege drop, exec agent. | Inside sandbox |
+| **CommandGrid** | Orchestrator. Config, secrets, provisioning, tools, network policy. | Host (CLI or HTTP server) |
+| **GhostProxy** | Stateless reverse proxy. Token validation, credential injection, token metering. | Host (daemon) |
+| **RootFS** | Container image + entrypoint. Env stripping, privilege drop, exec agent. | Inside sandbox |
 | **api-gateway** | Customer-facing REST API. Job submission, SSE streaming, billing. | Host (daemon) |
 | **tools** | MCP tool sidecar containers. One per tool, on sandbox network. | Inside sandbox network |
 | **agent** | Reference agent. LLM calls + tool execution loop. | Inside sandbox |
@@ -65,9 +65,9 @@ flowchart TB
 sequenceDiagram
     participant Customer
     participant GW as api-gateway
-    participant CP as control-plane
+    participant CP as CommandGrid
     participant Store as secret store
-    participant Proxy as llm-proxy
+    participant Proxy as GhostProxy
     participant Docker as Provisioner
     participant Sandbox as sandbox
     participant Tools as tool sidecars
@@ -120,7 +120,7 @@ The `Up` command in `pkg/orchestrator/orchestrator.go` runs these steps:
 
 9. **Provision sandbox.** Call the provisioner with the env map, mounts, resource limits, and network ID.
 
-10. **Register proxy sessions.** POST to llm-proxy for each `proxy` mode secret.
+10. **Register proxy sessions.** POST to GhostProxy for each `proxy` mode secret.
 
 11. **Start sandbox.** The entrypoint takes over from here.
 

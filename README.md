@@ -1,17 +1,17 @@
-# control-plane
+# CommandGrid
 
-The orchestrator for the agent sandbox system. Reads a `sandbox.toml` config, manages a pluggable secret store, provisions sandboxes (Docker, Fly Machines, or Unikraft), coordinates the [llm-proxy](https://github.com/Travbz/llm-proxy) for credential proxying, and spins up MCP tool sidecars. One command to boot a fully isolated agent environment with the hybrid credential model.
+The orchestrator for the agent sandbox system. Reads a `sandbox.toml` config, manages a pluggable secret store, provisions sandboxes (Docker, Fly Machines, or Unikraft), coordinates [GhostProxy](https://github.com/Travbz/GhostProxy) for credential proxying, and spins up MCP tool sidecars. One command to boot a fully isolated agent environment with the hybrid credential model.
 
 ## System overview
 
 | Repo | What it does |
 |---|---|
-| **[control-plane](https://github.com/Travbz/control-plane)** | This repo -- orchestrator, config, secrets, provisioning, tools, memory, billing |
-| **[llm-proxy](https://github.com/Travbz/llm-proxy)** | Credential-injecting LLM reverse proxy with token metering |
-| **[sandbox-image](https://github.com/Travbz/sandbox-image)** | Container image -- entrypoint, env stripping, privilege drop |
+| **[CommandGrid](https://github.com/Travbz/CommandGrid)** | This repo -- orchestrator, config, secrets, provisioning, tools, memory, billing |
+| **[GhostProxy](https://github.com/Travbz/GhostProxy)** | Credential-injecting LLM reverse proxy with token metering |
+| **[RootFS](https://github.com/Travbz/RootFS)** | Container image -- entrypoint, env stripping, privilege drop |
 | **[api-gateway](https://github.com/Travbz/api-gateway)** | Customer-facing REST API -- job submission, SSE streaming, billing |
-| **[tools](https://github.com/Travbz/tools)** | MCP tool monorepo -- spec, reference tools |
-| **[agent](https://github.com/Travbz/agent)** | Reference agent implementation |
+| **[ToolCore](https://github.com/Travbz/ToolCore)** | MCP tool monorepo -- spec, reference tools |
+| **[JudgementD](https://github.com/Travbz/JudgementD)** | Reference agent implementation |
 
 ---
 
@@ -21,8 +21,8 @@ The orchestrator for the agent sandbox system. Reads a `sandbox.toml` config, ma
 flowchart LR
     subgraph Host
         GW[api-gateway]
-        CP[control-plane]
-        Proxy[llm-proxy]
+        CP[CommandGrid]
+        Proxy[GhostProxy]
         Secrets[(secret store)]
         Allow[allowlist proxy]
     end
@@ -60,18 +60,18 @@ flowchart LR
 
 ```
 ~/projects/
-├── control-plane/    # this repo
-├── llm-proxy/
-├── sandbox-image/
+├── CommandGrid/    # this repo
+├── GhostProxy/
+├── RootFS/
 ├── api-gateway/      # optional: customer-facing API
-├── tools/            # optional: MCP tool sidecars
-└── agent/            # optional: reference agent
+├── ToolCore/         # optional: MCP tool sidecars
+└── JudgementD/       # optional: reference agent
 ```
 
 ### Quick setup (automated)
 
 ```bash
-cd control-plane
+cd CommandGrid
 ./setup.sh
 ```
 
@@ -81,28 +81,28 @@ Builds all three core services, prompts for your Anthropic API key, and drops a 
 
 ```bash
 # 1. Build the LLM proxy
-cd ../llm-proxy && make build
+cd ../GhostProxy && make build
 
 # 2. Build the sandbox container image
-cd ../sandbox-image && make image-local
+cd ../RootFS && make image-local
 
 # 3. Build the control plane
-cd ../control-plane && make build
+cd ../CommandGrid && make build
 ```
 
 ### Adding credentials
 
-The control plane stores secrets in `~/.config/control-plane/secrets/`. Add them by name -- these names are what you reference in `sandbox.toml`.
+CommandGrid stores secrets in `~/.config/CommandGrid/secrets/`. Add them by name -- these names are what you reference in `sandbox.toml`.
 
 ```bash
 # LLM key -- will be proxied, never enters the sandbox
-./build/control-plane secrets add --name anthropic_key --value "sk-ant-api03-..."
+./build/CommandGrid secrets add --name anthropic_key --value "sk-ant-api03-..."
 
 # Direct-inject secrets -- these go straight into the sandbox as env vars
-./build/control-plane secrets add --name github_token --value "ghp_..."
+./build/CommandGrid secrets add --name github_token --value "ghp_..."
 
 # Verify
-./build/control-plane secrets list
+./build/CommandGrid secrets list
 ```
 
 ### Hello world
@@ -111,11 +111,11 @@ The `examples/hello-world/` directory proves the full flow end to end.
 
 ```bash
 # terminal 1 -- start the proxy
-../llm-proxy/build/llm-proxy -addr :8090
+../GhostProxy/build/ghostproxy -addr :8090
 
 # terminal 2 -- boot the sandbox
 cd examples/hello-world
-../../build/control-plane up --name hello-world
+../../build/CommandGrid up --name hello-world
 ```
 
 Or the all-in-one script:
@@ -140,14 +140,14 @@ What this does:
 ```mermaid
 sequenceDiagram
     participant User
-    participant CP as control-plane
+    participant CP as CommandGrid
     participant Store as secret store
-    participant Proxy as llm-proxy
+    participant Proxy as GhostProxy
     participant Docker as Provisioner
     participant Sandbox as sandbox
     participant Tools as tool sidecars
 
-    User->>CP: control-plane up --name my-agent
+    User->>CP: CommandGrid up --name my-agent
     CP->>Store: Resolve secrets from sandbox.toml
     Store-->>CP: Values for inject secrets, keys for proxy secrets
 
@@ -181,7 +181,7 @@ Each secret in `sandbox.toml` has a mode:
 
 | Mode | What happens | Good for |
 |---|---|---|
-| `proxy` | Real key stays on host. Sandbox gets a session token. LLM calls go through llm-proxy which injects the real key. | LLM API keys (high value, high risk) |
+| `proxy` | Real key stays on host. Sandbox gets a session token. LLM calls go through GhostProxy which injects the real key. | LLM API keys (high value, high risk) |
 | `inject` | Real value injected directly as an env var into the sandbox. | SSH keys, registry tokens, git credentials |
 
 ```toml
@@ -195,7 +195,7 @@ mode = "inject"
 env_var = "GITHUB_TOKEN"
 ```
 
-When a proxied secret is configured, the control plane injects two env vars per provider:
+When a proxied secret is configured, CommandGrid injects two env vars per provider:
 
 | Provider | API key env var | Base URL env var |
 |---|---|---|
@@ -211,7 +211,7 @@ Standard SDKs read these env vars and route through the proxy automatically. No 
 
 ```toml
 sandbox_mode = "docker"           # "docker", "fly", or "unikraft"
-image = "sandbox-image:latest"
+image = "RootFS:latest"
 
 [proxy]
 addr = ":8090"
@@ -307,7 +307,7 @@ The secret store is pluggable. Multiple backends implement the same interface:
 
 ```mermaid
 flowchart LR
-    CP[control-plane] --> IF{secrets.Store}
+    CP[CommandGrid] --> IF{secrets.Store}
     IF -->|local dev| FS[FileStore<br/>~/.config/.../secrets.json]
     IF -->|CI / env| ES[EnvStore<br/>SECRET_* env vars]
     IF -->|customer vault| DS[DelegatedStore<br/>AWS SM / Vault]
@@ -321,7 +321,7 @@ flowchart LR
 | `EnvStore` | CI pipelines, containers | No (read-only at runtime) | Env vars / .env file |
 | `DelegatedStore` | Multi-tenant production | No (customer manages) | AWS Secrets Manager or HashiCorp Vault |
 
-The `DelegatedStore` fetches secrets from a customer's own vault at runtime with a short TTL cache. Customers rotate and manage their own credentials -- the control plane never stores them.
+The `DelegatedStore` fetches secrets from a customer's own vault at runtime with a short TTL cache. Customers rotate and manage their own credentials -- CommandGrid never stores them.
 
 ---
 
@@ -369,10 +369,10 @@ Tool env values prefixed with `inject:` are resolved from the secret store.
 
 ## Server mode
 
-For production, the control plane can run as an HTTP server:
+For production, CommandGrid can run as an HTTP server:
 
 ```bash
-control-plane serve --listen :8091
+CommandGrid serve --listen :8091
 ```
 
 This exposes an internal API for the [api-gateway](https://github.com/Travbz/api-gateway):
@@ -424,25 +424,25 @@ Per-customer configuration for personalization:
 ### Managing secrets
 
 ```bash
-control-plane secrets add --name anthropic_key --value "sk-ant-..."
-control-plane secrets add --name github_token --value "ghp_..."
-control-plane secrets list
-control-plane secrets rm --name old_key
+CommandGrid secrets add --name anthropic_key --value "sk-ant-..."
+CommandGrid secrets add --name github_token --value "ghp_..."
+CommandGrid secrets list
+CommandGrid secrets rm --name old_key
 ```
 
 ### Running sandboxes (CLI)
 
 ```bash
-control-plane up --name my-agent              # reads sandbox.toml
-control-plane status                          # list all sandboxes
-control-plane status --id <container-id>      # single sandbox
-control-plane down --id <container-id>        # stop and destroy
+CommandGrid up --name my-agent              # reads sandbox.toml
+CommandGrid status                          # list all sandboxes
+CommandGrid status --id <container-id>      # single sandbox
+CommandGrid down --id <container-id>        # stop and destroy
 ```
 
 ### Running as a server
 
 ```bash
-control-plane serve --listen :8091
+CommandGrid serve --listen :8091
 ```
 
 ---
@@ -450,7 +450,7 @@ control-plane serve --listen :8091
 ## Building
 
 ```bash
-make build    # builds to ./build/control-plane
+make build    # builds to ./build/CommandGrid
 make test     # runs all tests
 make lint     # golangci-lint
 make vet      # go vet
@@ -461,7 +461,7 @@ make vet      # go vet
 ## Project structure
 
 ```
-control-plane/
+CommandGrid/
 ├── main.go
 ├── cmd/
 │   ├── up.go                        # start a sandbox
